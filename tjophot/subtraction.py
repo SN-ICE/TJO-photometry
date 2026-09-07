@@ -35,7 +35,10 @@ class DifferenceResult:
     variance: np.ndarray              # per-pixel variance of the difference
     wcs: WCS
     science_stamp: np.ndarray
-    reference_stamp: np.ndarray       # reference resampled (and convolved) to match
+    # Whichever frame was convolved, resampled onto the science grid: the
+    # matched reference, or -- in convolve_science mode -- the science frame
+    # degraded to the reference PSF. Label it by `mode`, not by its name.
+    reference_stamp: np.ndarray
     kernel: np.ndarray                # kernel at the centre of the stamp
     kernel_sum: float                 # photometric scaling reference -> science
     flux_scale: float                 # divide difference fluxes by this
@@ -272,17 +275,39 @@ def subtract(image, reference, cfg, coord: SkyCoord,
     area_ratio = (image.meta.pixel_scale / max(reference.pixel_scale, 1e-6)) ** 2
 
     # --- which frame gets convolved? -------------------------------------
-    ref_fwhm = _stamp_fwhm(np.nan_to_num(ref_data), mask, fwhm_px)
+    # What the reference's own sampling implies about its PSF, in science
+    # pixels. Survey images are sampled at roughly 2.5 pixels per FWHM: a crude
+    # estimate, but an honest one, and a far better starting point for the fit
+    # than the science seeing, which tells us nothing about the reference.
+    expected_ref_fwhm = 2.5 * reference.pixel_scale / max(image.meta.pixel_scale, 1e-6)
+    ref_fwhm = _stamp_fwhm(np.nan_to_num(ref_data), mask, fwhm_px,
+                           seed=expected_ref_fwhm)
+    ref_fwhm_measured = bool(np.isfinite(ref_fwhm))
+    if not ref_fwhm_measured:
+        # Do not fall through to convolve_reference here. That would quietly ask
+        # the kernel to *deconvolve* the reference, which it cannot do: it comes
+        # back with a ringing kernel and a "difference" that is essentially the
+        # science frame, host galaxy and all. An unmeasurable PSF is not
+        # evidence of a sharp one, so fall back on the sampling estimate.
+        ref_fwhm = expected_ref_fwhm
+        log.warning("%s: could not measure the reference PSF; assuming %.2f px "
+                    "from its %.2f\"/px sampling", image.meta.path.name, ref_fwhm,
+                    reference.pixel_scale)
+
     mode = "convolve_reference"
     science_fit, reference_fit = science, ref_data
     flip_ratio = float(cfg.get("subtraction.convolve_science_ratio", 1.25))
-    if np.isfinite(ref_fwhm) and ref_fwhm > flip_ratio * fwhm_px:
+    if ref_fwhm > flip_ratio * fwhm_px:
         # The reference is blurrier: matching it to the science would be a
         # deconvolution. Degrade the science instead and difference there.
         mode = "convolve_science"
         science_fit, reference_fit = ref_data, science
         log.info("reference seeing (%.2f px) is worse than the science (%.2f px):"
                  " convolving the science frame instead", ref_fwhm, fwhm_px)
+    log.info("%s: PSF match -- reference %.2f px (%s), science %.2f px, %s",
+             image.meta.path.name, ref_fwhm,
+             "measured" if ref_fwhm_measured else "assumed from sampling",
+             fwhm_px, mode)
 
     work_mask = mask | ~np.isfinite(science_fit) | ~np.isfinite(reference_fit)
     try:
@@ -344,6 +369,7 @@ def subtract(image, reference, cfg, coord: SkyCoord,
         "reference_source": reference.source,
         "reference_band": reference.source_band or reference.band,
         "reference_fwhm_px": float(ref_fwhm),
+        "reference_fwhm_measured": ref_fwhm_measured,
         "science_fwhm_px": float(fwhm_px),
         "coverage": coverage,
         "difference_rms": diff_rms,
@@ -359,7 +385,7 @@ def subtract(image, reference, cfg, coord: SkyCoord,
 
 
 def _stamp_fwhm(data: np.ndarray, mask: np.ndarray, fallback: float,
-                min_stars: int = 5) -> float:
+                min_stars: int = 5, seed: Optional[float] = None) -> float:
     """Median stellar FWHM of a stamp, in its own pixels.
 
     Iterated from a deliberately sharp starting guess. An earlier version took
@@ -367,6 +393,15 @@ def _stamp_fwhm(data: np.ndarray, mask: np.ndarray, fallback: float,
     size, which on a deep reference let the fit wander onto blends: the
     "measured" reference width then simply tracked the science seeing, and the
     decision about which frame to convolve became noise.
+
+    The fitting box must be able to hold the PSF it is measuring, and the box
+    is set by the current guess. A width well above the guess was therefore
+    thrown out as implausible, and with too few widths left the function
+    returned "unknown" on its first pass -- precisely for the references much
+    blurrier than the science, which are the ones the caller most needs to
+    recognise. So a round that ends short of *min_stars* now widens the guess
+    and tries again rather than giving up, and *seed* lets the caller start
+    from the resolution it expects instead of from the science seeing.
     """
     from photutils.detection import DAOStarFinder
     from .detection import _fit_gaussian_fwhm
@@ -378,37 +413,46 @@ def _stamp_fwhm(data: np.ndarray, mask: np.ndarray, fallback: float,
     except Exception:
         return float("nan")
 
-    guess = float(np.clip(fallback, 2.0, 6.0))
+    start = seed if (seed is not None and np.isfinite(seed) and seed > 0) else fallback
+    # The box is 2.5 guesses wide and stars within a box of the edge are
+    # skipped, so the guess cannot grow without limit on a small stamp.
+    guess_max = float(np.clip(min(data.shape) / 16.0, 6.0, 25.0))
+    guess = float(np.clip(start, 2.0, guess_max))
     result = float("nan")
 
-    for _ in range(4):
+    for _ in range(6):
+        half = int(np.ceil(2.5 * guess))
+        widths = []
         try:
             finder = DAOStarFinder(fwhm=guess, threshold=15.0 * std, exclude_border=True)
             found = finder(data - median, mask=mask)
         except Exception:
             return result
-        if found is None or len(found) == 0:
-            return result
 
-        found = found[np.argsort(-np.asarray(found["flux"]))][:60]
-        half = int(np.ceil(2.5 * guess))
-        peak_limit = np.nanpercentile(data, 99.99)
-        widths = []
-        for row in found:
-            x, y = int(round(float(row["xcentroid"]))), int(round(float(row["ycentroid"])))
-            if x - half < 0 or y - half < 0 or x + half + 1 > data.shape[1] \
-                    or y + half + 1 > data.shape[0]:
-                continue
-            if np.any(mask[y - half:y + half + 1, x - half:x + half + 1]):
-                continue
-            if float(row["peak"]) > 0.9 * peak_limit:
-                continue
-            value = _fit_gaussian_fwhm(data[y - half:y + half + 1, x - half:x + half + 1])
-            if value is not None and 0.8 < value < 0.8 * half:
-                widths.append(value)
+        if found is not None and len(found):
+            found = found[np.argsort(-np.asarray(found["flux"]))][:60]
+            peak_limit = np.nanpercentile(data, 99.99)
+            for row in found:
+                x, y = int(round(float(row["xcentroid"]))), int(round(float(row["ycentroid"])))
+                if x - half < 0 or y - half < 0 or x + half + 1 > data.shape[1] \
+                        or y + half + 1 > data.shape[0]:
+                    continue
+                if np.any(mask[y - half:y + half + 1, x - half:x + half + 1]):
+                    continue
+                if float(row["peak"]) > 0.9 * peak_limit:
+                    continue
+                value = _fit_gaussian_fwhm(data[y - half:y + half + 1, x - half:x + half + 1])
+                # A fitted width filling the box is not trustworthy -- but that
+                # says the box is too small, not that the star is bad.
+                if value is not None and 0.8 < value < 0.8 * half:
+                    widths.append(value)
 
         if len(widths) < min_stars:
+            if guess < guess_max:
+                guess = float(min(guess * 1.8, guess_max))
+                continue
             return result
+
         _, new_guess, _ = sigma_clipped_stats(np.array(widths), sigma=2.5, maxiters=5)
         if not np.isfinite(new_guess) or new_guess <= 0:
             return result
