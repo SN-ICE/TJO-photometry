@@ -71,7 +71,14 @@ def epoch_qa(path: Path, image, zp, apcor, diff=None, sn_xy=None, cutout=None,
                 b0, b1 = max(int(dy - half), 0), int(dy + half)
                 return arr[b0:b1, a0:a1]
             centre = (min(dx, half), min(dy, half)) if dx is not None else None
-            _stamp(axes[0, 1], _cut(diff.reference_stamp), "matched reference",
+            # In convolve_science mode this stamp is the *science* frame blurred
+            # to the reference PSF, so it still holds the transient. Calling it
+            # "the reference" makes a correct subtraction look like a
+            # contaminated template.
+            matched_title = ("science blurred to reference PSF"
+                             if diff.mode == "convolve_science"
+                             else "reference matched to science PSF")
+            _stamp(axes[0, 1], _cut(diff.reference_stamp), matched_title,
                    xy=centre, radius=image.fwhm_px * 1.2 if image.fwhm_px else None)
             _stamp(axes[0, 2], _cut(diff.difference), "difference",
                    xy=centre, radius=image.fwhm_px * 1.2 if image.fwhm_px else None)
