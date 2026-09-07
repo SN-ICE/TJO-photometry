@@ -1,0 +1,64 @@
+# SN2026acd -- TJO/MEIA2 testbed target.
+target:
+  name: SN2026acd
+  # Position: replace with the TNS/discovery coordinates for precise forced
+  # photometry. If left unset the pipeline falls back to the telescope
+  # pointing (OBJRA/OBJDEC), which is good to a few arcsec at best.
+  # position resolved from TNS on 2026-09-07 (object_type=SN Ia, redshift=0.00758, hostname=NGC4168)
+  ra: 183.0531491
+  dec: 13.2217510
+
+subtraction:
+  enabled: true
+  reference_sources:
+    # Pan-STARRS imaged this field years before the explosion, so it is a
+    # genuine pre-explosion template for griz and is tried first. Check it once
+    # with 'tjophot fetch-template SN2026acd' before relying on it.
+    # B and V have no PS1 counterpart of their own, so they borrow the nearest
+    # one via reference_band below. The host, NGC 4168, is an elliptical: a
+    # smooth, red, dust-free profile with only a mild colour gradient, which is
+    # the case where a cross-band template subtracts most cleanly. Those epochs
+    # are flagged 'cross_band_template' in the output. Replace this with a real
+    # B/V reference under reference_files as soon as you have one.
+    #
+    # PS1 is listed ahead of tjo_stack for B and V on purpose: a clean template
+    # in the wrong filter beats a same-filter one that still contains the
+    # supernova. A contaminated template subtracts away the signal itself,
+    # which is unrecoverable; a colour mismatch only adds residuals you can see.
+    B: [file, hips, panstarrs, tjo_stack]
+    V: [file, hips, panstarrs, tjo_stack]
+    g: [file, panstarrs, tjo_stack]
+    r: [file, panstarrs, tjo_stack]
+    i: [file, panstarrs, tjo_stack]
+    z: [file, panstarrs, tjo_stack]
+  # Public-archive templates for the bands with no CCD survey of their own.
+  # DSS2 blue and red are the closest wide-field bandpass matches; they are
+  # photographic, so run 'tjophot fetch-template SN2026acd --compare --bands B V'
+  # once to check they actually beat the PS1 fallback on this field.
+  hips:
+    B: {survey: dss2-blue}
+    V: {survey: dss2-red}
+
+  # Fallback if the HiPS cutout is unusable: borrow the nearest PS1 filter.
+  reference_band:
+    B: g
+    V: r
+
+  tjo_stack:
+    # WARNING: on 2026-06 the SN is still detected at MJD 61212 (about 4.2 mag
+    # below peak in r), so a stack of these epochs still contains roughly 2 per
+    # cent of the peak flux and will bias the late-time points. Push this window
+    # later once the SN has truly faded, or supply a proper reference with
+    # subtraction.reference_files.
+    mjd_min: 61197.0
+    mjd_max: null
+    max_images: 6
+    min_images: 2
+
+# When your own TJO B/V templates exist, put them here and they win over
+# everything else -- 'file' is first in every reference_sources list:
+#
+# subtraction:
+#   reference_files:
+#     B: ~/Desktop/TJO/refs/SN2026acd_ref_B.fits
+#     V: ~/Desktop/TJO/refs/SN2026acd_ref_V.fits

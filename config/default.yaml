@@ -1,0 +1,206 @@
+# ---------------------------------------------------------------------------
+# tjophot default configuration
+# Every key can be overridden by a user config passed with --config, and by a
+# per-target file in targets/<NAME>.yaml (merged on top of this one).
+# ---------------------------------------------------------------------------
+
+instrument: tjo_meia2          # -> config/instruments/<name>.yaml
+
+# Transient Name Server credentials, for looking a target name up. Get a bot at
+# https://www.wis-tns.org/bots . Leave these null and export TNS_API_KEY,
+# TNS_BOT_ID and TNS_BOT_NAME instead if you would rather not keep a key in a
+# file; without either, name resolution falls back to SIMBAD.
+tns:
+  api_key: null
+  bot_id: null
+  bot_name: null
+
+target:
+  # Set ra/dec in targets/<NAME>.yaml for proper forced photometry. If they are
+  # missing, the pipeline looks the name up (TNS first, then SIMBAD) and writes
+  # the answer into the target file, so it only ever has to be done once.
+  ra: null
+  dec: null
+  resolve: auto                # auto (only when ra/dec are unset) | always | off
+  resolve_sources: [tns, simbad]
+  resolve_write: true          # record the resolved position in targets/<NAME>.yaml
+  refine: auto                 # auto (only when ra/dec are unset) | always | off
+  refine_radius_arcsec: 3.0    # reject a refinement that wants to move further
+
+paths:
+  # Directory holding <TARGET>/*.fits. Override on the command line with
+  # --data-root, or edit this line.
+  data_root: ~/Desktop/TJO/finalfiles
+  work_root: runs              # outputs go to <work_root>/<TARGET>/
+  cache_root: cache            # reference catalogues + template images
+
+# ------------------------------ astrometry ---------------------------------
+# The astrometry.net solution in the header is close but not tight. Re-fitting
+# it against the reference catalogue matters because every aperture, PSF fit
+# and difference stamp is placed through the WCS.
+astrometry:
+  mode: linear                 # off | shift | linear | sip
+  catalog: gaia_astrometry     # Gaia DR3 positions (deeper than the GSPC subset)
+  fallback_catalogs: [gaia_synth, panstarrs, local]
+  search_radius_arcmin: 10.0
+  max_mag: 20.0
+  match_radius_arcsec: 3.0     # first pass, generous
+  final_match_radius_arcsec: 1.0
+  min_stars: 8
+  sip_degree: 2                # only used when mode is 'sip'
+  iterations: 2
+  sigma_clip: 3.0
+  max_shift_arcsec: 30.0       # reject a solution that moves the frame further
+  max_rms_arcsec: 2.0          # reject a solution with a worse residual than this
+
+# --------------------------- image preparation -----------------------------
+image:
+  saturation_adu: 55000        # conservative; MEIA2 full well ~65k
+  edge_margin_px: 24           # ignore this border when detecting/calibrating
+  bad_value_mask: [0.0]        # pixel values treated as bad
+  pattern:
+    # Fixed detector patterns measured with 'tjophot build-pattern'. Applied
+    # only for bands that actually have a stored pattern, so this can stay on.
+    enabled: true
+    calib_root: calib
+    block: 16                  # pattern grid: one value per block x block pixels
+    smooth_blocks: 24.0        # illumination = pattern smoothed on this many blocks
+                               # (24 x 16 px ~ 380 px, well above the ~100 px fringes)
+    min_frames: 8
+    max_frames: 60
+    fit_fringe_scale: true     # fit the fringe amplitude per frame
+    max_fringe_fraction: 0.5   # refuse to remove more than this fraction of sky
+    min_flatness_gain: 1.05    # skip the fringe term unless it flattens the frame
+  background:
+    box_size: 128              # px, Background2D mesh
+    filter_size: 5
+    sigma_clip: 3.0
+
+# ----------------------------- source detection ----------------------------
+detection:
+  threshold_sigma: 5.0
+  fwhm_init_arcsec: 2.0        # starting guess before the real FWHM is measured
+  fwhm_min_arcsec: 0.8
+  fwhm_max_arcsec: 8.0
+  sharplo: 0.2
+  sharphi: 1.0
+  roundlo: -0.75
+  roundhi: 0.75
+  min_stars_for_fwhm: 6
+  max_stars_for_fwhm: 40
+
+# ------------------------------- photometry --------------------------------
+photometry:
+  aperture_scale: 1.2          # aperture radius = scale x FWHM
+  curve_of_growth_scales: [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
+  apcor_scale: 4.0             # radius (x FWHM) taken as "total" flux
+  annulus_scale: [5.0, 8.0]    # sky annulus radii (x FWHM)
+  min_apcor_stars: 5
+  isolation_scale: 3.0         # neighbour-free radius (x FWHM) for PSF/apcor stars
+  local_bkg: annulus           # annulus | global
+  empirical_errors: true       # use blank-aperture scatter as the sky-noise floor
+                               # (essential on difference images, whose noise is correlated)
+  psf:
+    enabled: true
+    oversampling: 1            # TJO is well sampled (FWHM ~5 px); >1 destabilises the EPSF
+    smoothing_kernel: null     # 'quartic'/'quadratic' distort the EPSF here; keep null
+    fwhm_tolerance: 0.25       # reject PSF-star candidates whose own width differs by more
+    stamp_scale: 5.0           # EPSF stamp half-size (x FWHM), forced odd
+    maxiters: 6
+    min_stars: 5
+    fit_shape_scale: 1.5       # fitting box half-size (x FWHM)
+    recentre: true             # let the SN centroid float (within recentre_max_px)
+    recentre_max_px: 2.0
+
+# ---------------------------- flux calibration -----------------------------
+calibration:
+  catalogs: [gaia_synth, panstarrs, apass]   # tried in order, per band
+  search_radius_arcmin: 9.0
+  match_radius_arcsec: 1.5
+  min_snr: 20.0
+  max_cat_err: 0.05
+  min_stars: 5
+  mag_range: [11.0, 19.0]
+  sigma_clip: 3.0
+  color_term: fit              # fit | fixed | none
+  color_term_max: 0.6          # |C| above this means a runaway fit; refit without it
+  color_term_fixed: {}         # e.g. {g: 0.03, r: -0.02}  (mag per mag of colour)
+  color_pivot: {B: 0.65, V: 0.65, g: 0.45, r: 0.35, i: 0.30, z: 0.30}
+  zp_error_floor: 0.01
+  max_rms: 0.25                # above this the frame is flagged poor_calibration
+  limiting_sigma: 3.0
+
+# ---------------------------- template subtraction -------------------------
+subtraction:
+  enabled: true
+  # Reference image source per band. Tried in order until one succeeds.
+  #   file       : explicit path, set in the target file
+  #   tjo_stack  : stack of this target's own TJO epochs (see template_epochs)
+  #   panstarrs  : PS1 DR2 stacked cutout downloaded from MAST (g,r,i,z,y only)
+  reference_sources:
+    B: [file, hips, tjo_stack]
+    V: [file, hips, tjo_stack]
+    g: [file, panstarrs, hips, tjo_stack]
+    r: [file, panstarrs, hips, tjo_stack]
+    i: [file, panstarrs, hips, tjo_stack]
+    z: [file, panstarrs, hips, tjo_stack]
+
+  # Which public survey to render for each band, through the CDS hips2fits
+  # service. Give a HiPS id ("CDS/P/DSS2/blue") or one of the shorthands in
+  # templates.HIPS_ALIASES: dss2-blue, dss2-red, sdss9-u/g/r/i/z, ps1-g/r/i/z/y.
+  # pixel_scale is optional and defaults to the survey's native resolution.
+  #
+  # B and V have no all-sky CCD survey of their own. DSS2 blue and red are the
+  # closest wide-field matches in bandpass -- but they are photographic, so
+  # their response is not proportional to flux, and one kernel scaling cannot
+  # match a non-linear plate to a linear CCD frame across a bright galaxy.
+  # Where a deep linear survey exists, borrowing it through
+  # subtraction.reference_band usually subtracts better despite the bandpass
+  # mismatch. 'tjophot fetch-template --compare' measures which wins on your
+  # own field instead of guessing.
+  hips:
+    B: {survey: dss2-blue}
+    V: {survey: dss2-red}
+  hips_max_pixels: 4000
+  panstarrs:
+    size_arcmin: null          # cutout to request; default is 1.25 x cutout_arcmin
+    max_size_px: 3200          # PS1 pixels are 0.25", so this caps a request at ~13'
+    timeout_s: 600.0
+    mosaic: true               # fetch neighbouring skycells to fill the tile edges
+  # A band with no survey template of its own (B, V) can borrow another filter's,
+  # e.g. {B: g, V: r}. Off by default: the kernel absorbs the overall flux ratio,
+  # but a colour gradient across the host leaves structured residuals, so this is
+  # a judgement call about your host, not a free lunch. Epochs measured this way
+  # are flagged 'cross_band_template'.
+  reference_band: {}          # e.g. {B: g, V: r} to borrow another filter's template
+  convolve_science_ratio: 1.25 # convolve the science frame only when the reference
+                               # seeing is this much worse; a survey stack is
+                               # normally sharper than TJO, so this rarely fires
+  cutout_arcmin: 9.0           # size of the working stamp around the SN
+                               # (bigger = more stars for the kernel and the PSF)
+  max_chi2: 2.5                # above this the difference is flagged as unreliable
+  tjo_stack:
+    mjd_min: null              # epochs used to build the target's own template
+    mjd_max: null
+    exclude_science: true      # never let an epoch be its own template
+    min_images: 2
+    combine: median
+  kernel:
+    gauss_sigmas_px: [0.7, 1.5, 3.0]
+    gauss_degrees: [4, 2, 0]   # polynomial modifier degree per Gaussian
+    half_size_px: 9            # kernel half-width
+    spatial_order: 0           # 0 = spatially constant kernel over the stamp
+    background_order: 1        # differential background polynomial order
+    n_stamps: 40               # bright stars used to solve for the kernel
+    stamp_half_px: 20
+    sigma_clip: 3.0
+    max_iter: 3
+
+# ------------------------------- outputs -----------------------------------
+output:
+  primary_method: auto         # auto | difference_psf | psf | aperture
+  write_diagnostics: true
+  write_qa_plots: true
+  write_stamps: true
+  stamp_arcsec: 60.0
+  overwrite: false

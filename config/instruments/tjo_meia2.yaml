@@ -1,0 +1,61 @@
+# Telescopi Joan Oro (OAdM) + MEIA2 CCD
+name: TJO/MEIA2
+telescope: TJO
+site: OAdM
+
+header:
+  mjd: [MJD-OBS]
+  jd: [JD]
+  dateobs: [DATE-OBS]
+  timeobs: [TIME-OBS]
+  exptime: [EXPTIME]
+  filter: [FILTER]
+  object: [OBJECT, TARGET]
+  gain: [GAIN]                 # e- per ADU
+  readnoise: [RDNOISE]         # e-
+  target_ra: [OBJRA, RA]       # sexagesimal hours
+  target_dec: [OBJDEC, DEC]    # sexagesimal degrees
+  binning_x: [XFACTOR]
+  binning_y: [YFACTOR]
+  airmass: [AIRMASS]
+  imagetype: [IMAGETYP, OBSTYPE]
+  quality: [IMGQS]
+
+defaults:
+  gain: 1.04
+  readnoise: 9.0
+  pixel_scale: 0.36            # arcsec/px, unbinned; only used if WCS is absent
+  saturation_adu: 55000
+
+# FILTER header value -> canonical band name
+filters:
+  "B": B
+  "V": V
+  "R": R
+  "I": I
+  "U": U
+  "SDSS u": u
+  "SDSS g": g
+  "SDSS r": r
+  "SDSS i": i
+  "SDSS z": z
+  "u": u
+  "g": g
+  "r": r
+  "i": i
+  "z": z
+  "Clear": C
+  "None": C
+
+# Photometric system each band is reported in
+systems:
+  U: vega
+  B: vega
+  V: vega
+  R: vega
+  I: vega
+  u: ab
+  g: ab
+  r: ab
+  i: ab
+  z: ab
