@@ -139,6 +139,76 @@ def _describe_size(paths) -> str:
     return f"{total / 1e6:.1f} MB" if total else "0 MB"
 
 
+def cmd_recalibrate(args) -> int:
+    """Recover missing zero points in an existing run, without re-measuring."""
+    import numpy as np
+    import pandas as pd
+    from . import lightcurve as lc
+    from . import plots
+    from . import zeropoints
+
+    setup_logging(args.log_level)
+    cfg = _build_config(args)
+    outdir = Path(cfg.work_root) / args.target
+    table = outdir / f"{args.target}_photometry_all.csv"
+    if not table.exists():
+        print(f"no photometry table at {table}", file=sys.stderr)
+        return 1
+
+    frame = pd.read_csv(table)
+    before = int((~np.isfinite(frame["zp"])).sum())
+    print(f"{len(frame)} rows, {before} without a zero point\n")
+
+    offsets = zeropoints.band_offsets(frame,
+                                      min_nights=int(cfg.get("calibration.transfer_min_nights", 3)))
+    if offsets:
+        print(f"{'pair':<8} {'offset':>8} {'scatter':>9} {'nights':>7}")
+        for (a, b), (offset, scatter, n) in sorted(offsets.items()):
+            if a < b:
+                print(f"{a + '-' + b:<8} {offset:>8.3f} {scatter:>9.3f} {n:>7d}")
+        print()
+
+    frame, report = zeropoints.transfer(frame, cfg)
+    if not report["recovered"]:
+        print("nothing could be recovered")
+        return 0
+
+    print(f"{'image':<42} {'band':>4} {'from':>9} {'ZP':>8} {'+-':>6} {'spread':>7}")
+    for item in report["recovered"]:
+        print(f"{item['image'][:42]:<42} {item['band']:>4} {item['from']:>9} "
+              f"{item['zp']:>8.3f} {item['zp_err']:>6.3f} "
+              f"{item.get('partner_spread', float('nan')):>7.3f}")
+    print("\n'spread' is how much the partner bands disagree: small means the "
+          "night's\nextinction was grey and the transfer is solid, large means it "
+          "was not.")
+    if report["unrecovered"]:
+        print(f"\n{len(report['unrecovered'])} frames still unrecovered "
+              f"(no calibrated band that night)")
+
+    if args.dry_run:
+        print("\n--dry-run: nothing written")
+        return 0
+
+    # Keep the measured table before overwriting it: recalibration only fills
+    # in what was missing, but it rewrites the file to do so.
+    import shutil
+    backup = table.with_suffix(".csv.bak")
+    if not backup.exists():
+        shutil.copy2(table, backup)
+        print(f"\nkept the original as {backup.name}")
+
+    frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")))
+    frame.to_csv(table, index=False, float_format="%.6f")
+    slim_path = outdir / f"{args.target}_lightcurve.csv"
+    primary = frame[frame["primary"].astype(bool)]
+    keep = [c for c in pd.read_csv(slim_path, nrows=0).columns if c in primary.columns]
+    primary[keep].to_csv(slim_path, index=False, float_format="%.6f")
+    plots.lightcurve(outdir / f"{args.target}_lightcurve.png", frame, args.target)
+    plots.run_diagnostics(outdir / f"{args.target}_diagnostics.png", frame, args.target)
+    print(f"\nrewrote {table.name}, {slim_path.name} and the plots")
+    return 0
+
+
 def cmd_clean(args) -> int:
     """Delete a target's outputs, and optionally its cached downloads."""
     import shutil
@@ -691,6 +761,14 @@ def main(argv=None) -> int:
     _add_common(list_parser)
     list_parser.add_argument("-v", "--verbose", action="store_true")
     list_parser.set_defaults(func=cmd_list)
+
+    rc_parser = sub.add_parser(
+        "recalibrate",
+        help="recover missing zero points in a finished run from another band")
+    _add_common(rc_parser)
+    rc_parser.add_argument("-n", "--dry-run", action="store_true",
+                           help="report what would be recovered, write nothing")
+    rc_parser.set_defaults(func=cmd_recalibrate)
 
     cl_parser = sub.add_parser(
         "clean", help="delete a target's outputs, and optionally its cached downloads")

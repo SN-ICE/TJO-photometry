@@ -28,6 +28,7 @@ from . import lightcurve as lc
 from . import nameresolve
 from . import photometry as ph
 from . import plots
+from . import zeropoints
 from . import patterns as pat
 from . import templates as tpl
 from . import subtraction as sub
@@ -608,6 +609,7 @@ def _photometry_row(common: dict, method: str, flux: float, flux_err: float,
 
     return lc.new_row(
         **common, method=method, mag=mag, mag_err=mag_err, is_limit=is_limit,
+        mag_offset=apcor_mag, zp_source=("fit" if zp.ok else ""),
         flux=flux / exptime, flux_err=flux_err / exptime, snr=snr,
         x=x, y=y, dx=dx, dy=dy, flags=flags, limit_mag=limit,
     )
@@ -702,6 +704,14 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
         raise RuntimeError("no photometry could be measured")
 
     frame = lc.to_frame(rows)
+
+    if bool(cfg.get("calibration.transfer_zeropoints", True)):
+        frame, transfer_report = zeropoints.transfer(frame, cfg)
+        if transfer_report.get("recovered"):
+            frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")))
+    else:
+        transfer_report = {}
+
     paths_out = lc.write(frame, outdir, target, append=append,
                          preference=str(cfg.get("output.primary_method", "auto")))
     if append:
@@ -724,6 +734,11 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
         "position_refined_by_arcsec": None if not np.isfinite(offset) else round(offset, 3),
         "position_from_config": bool(explicit),
         "elapsed_s": round(time.time() - started, 1),
+        "zeropoint_transfer": {
+            "recovered": len(transfer_report.get("recovered", [])),
+            "unrecovered": len(transfer_report.get("unrecovered", [])),
+            "band_offsets": transfer_report.get("offsets", {}),
+        },
         "references": {
             band: (None if ref is None else {
                 "source": ref.source,

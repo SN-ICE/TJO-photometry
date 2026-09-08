@@ -297,6 +297,43 @@ the target file, or set an MJD window under `subtraction.tjo_stack` once the
 supernova has faded. Without a template the pipeline reports direct PSF
 photometry for those bands and says so.
 
+## Frames that came back with no zero point
+
+A frame that finds too few catalogue stars gets `no_zeropoint` and no
+magnitude, even though its flux was measured fine. Two things help.
+
+**Fix the cause.** The catalogue-error cut is per survey
+(`calibration.max_cat_err`), because Gaia synthetic photometry is good to
+millimagnitudes while APASS B errors run 0.05-0.15. A single tight cut throws
+APASS away: on the SN2026acd field it kept 2 of 27 B stars, where 0.12 keeps 21.
+
+**Recover what is left, after the fact:**
+
+```bash
+tjophot recalibrate SN2026acd -n     # report only
+tjophot recalibrate SN2026acd        # rewrite the tables and plots
+```
+
+This does *not* substitute the band's average zero point. The zero point tracks
+atmospheric transparency and spans 1.4-2.6 magnitudes within a band over a
+campaign, and calibration tends to fail on exactly the poor nights where an
+average is furthest from the truth. What is stable is the *difference* between
+two bands on the same night, since the extinction largely cancels: on SN2026acd
+those offsets hold to 0.02-0.10 mag. So a missing zero point is predicted from
+every other band observed that night and the predictions combined.
+
+How far apart those predictions land is the useful part. Agreement means the
+night's extinction was grey and the transfer is trustworthy; disagreement means
+it was not, and that spread goes into the uncertainty. Tested by hiding each
+fitted zero point in turn and predicting it: median error 0.030 mag, 90th
+percentile 0.154, with 93 per cent of cases inside the quoted 2 sigma.
+
+Recovered epochs are flagged `zp_transferred`, so they are easy to exclude.
+Sort them by `zp_err`: below about 0.10 the night was grey and the value is
+solid; above 0.25 treat it with real caution. The original table is kept as
+`*_photometry_all.csv.bak`. Runs do this automatically at the end
+(`calibration.transfer_zeropoints`).
+
 ## If something goes wrong
 
 **"cannot find .../config/default.yaml"** — the package was installed away from

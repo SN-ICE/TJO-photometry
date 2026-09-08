@@ -16,7 +16,8 @@ COLUMNS = [
     "target", "mjd", "band", "system", "method", "primary",
     "mag", "mag_err", "limit_mag", "is_limit",
     "flux", "flux_err", "snr",
-    "zp", "zp_err", "color_term", "color_term_err", "cal_provider", "cal_nstars", "cal_rms",
+    "zp", "zp_err", "zp_source", "color_term", "color_term_err",
+    "cal_provider", "cal_nstars", "cal_rms", "mag_offset",
     "apcor", "apcor_err", "aperture_radius_px",
     "fwhm_arcsec", "sky_adu", "sky_rms_adu", "exptime", "airmass",
     "astrom_rms_arcsec", "astrom_nstars", "pattern_applied", "fringe_scale_adu",
@@ -37,6 +38,8 @@ FLAG_NO_ZEROPOINT = 32       # no photometric calibration for this frame
 FLAG_POOR_CALIBRATION = 64   # zero-point fit has a large residual scatter
 FLAG_IN_TEMPLATE = 128       # this epoch is part of the reference image itself
 FLAG_CROSS_BAND_TEMPLATE = 256   # the template was taken in a different filter
+FLAG_ZP_TRANSFERRED = 512        # zero point borrowed from another band, same night
+FLAG_APPROX_OFFSET = 1024        # recalculated without the exact magnitude offset
 
 FLAG_NAMES = {
     FLAG_MASKED_PIXEL: "masked_pixel", FLAG_SATURATED: "saturated",
@@ -44,6 +47,7 @@ FLAG_NAMES = {
     FLAG_FEW_CAL_STARS: "few_cal_stars", FLAG_NO_ZEROPOINT: "no_zeropoint",
     FLAG_POOR_CALIBRATION: "poor_calibration", FLAG_IN_TEMPLATE: "in_template",
     FLAG_CROSS_BAND_TEMPLATE: "cross_band_template",
+    FLAG_ZP_TRANSFERRED: "zp_transferred", FLAG_APPROX_OFFSET: "approx_offset",
 }
 
 
@@ -164,7 +168,8 @@ def write(frame: pd.DataFrame, outdir: Path, target: str,
     primary = frame[frame["primary"].astype(bool)].copy()
     slim = primary[[
         "target", "mjd", "band", "system", "mag", "mag_err", "limit_mag", "is_limit",
-        "flux", "flux_err", "snr", "zp", "zp_err", "fwhm_arcsec", "astrom_rms_arcsec",
+        "flux", "flux_err", "snr", "zp", "zp_err", "zp_source", "fwhm_arcsec",
+        "astrom_rms_arcsec",
         "pattern_applied", "method",
         "cal_provider", "cal_nstars", "cal_rms", "ref_source", "flags", "flags_str", "image",
     ]]
