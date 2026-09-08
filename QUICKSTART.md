@@ -274,28 +274,183 @@ tjophot colorterms SN2026acd                 # fit the instrument colour terms
 Every flag has a config equivalent; `--config my.yaml` merges a file of your own
 over the defaults and the target file.
 
-## A new supernova
+## A new supernova, start to finish
+
+Nine steps. Steps 1-3 are the only ones that need thought; the rest is
+mechanical, and 4-8 are what `full-run.sh` does for you.
+
+### 1. Put the frames where the pipeline looks
 
 ```bash
-mkdir ~/Desktop/TJO/finalfiles/SN2027xyz      # put its frames here
-cat > targets/SN2027xyz.yaml <<'EOF'
-target:
-  name: SN2027xyz
-  ra: "01:23:45.6"
-  dec: "-12:34:56.7"
-EOF
-tjophot fetch-catalog SN2027xyz
-tjophot run SN2027xyz
+mkdir -p ~/Desktop/TJO/finalfiles/SN2027xyz
+# copy or link the reduced frames in
+tjophot list SN2027xyz
 ```
 
-No new pattern build is needed — `calib/` already has them.
+`list` is the check that matters: it prints one row per band with the frame
+count and the MJD range. If it says `0 images`, the frames are in the wrong
+place or `paths.data_root` points somewhere else. Files may sit either in
+`<data_root>/SN2027xyz/` or directly in `<data_root>/`; the subdirectory is
+tried first and wins.
 
-For difference imaging on a new target, Pan-STARRS templates are used
-automatically for g, r, i and z (Dec > -30). B and V have no PS1 counterpart, so
-either point `subtraction.reference_files.B` / `.V` at a real reference image in
-the target file, or set an MJD window under `subtraction.tjo_stack` once the
-supernova has faded. Without a template the pipeline reports direct PSF
-photometry for those bands and says so.
+Nothing else about the instrument needs setting up. The detector patterns in
+`calib/` are a property of the camera, not the target, and are picked up
+automatically -- rebuild them only if the CCD, filters or binning change.
+
+### 2. Write the target file
+
+```bash
+cp targets/TEMPLATE.yaml targets/SN2027xyz.yaml
+```
+
+Edit `target.name`. Leave `ra`/`dec` out unless you already know them -- the
+next step fills them in. The rest of the template is the subtraction setup,
+which the next section covers; the defaults are right for a northern field.
+
+### 3. Get the position
+
+```bash
+tjophot resolve SN2027xyz --write
+```
+
+Queries TNS, falls back to SIMBAD, and rewrites only the `ra`/`dec` lines of
+the target file, leaving every comment intact and recording where the position
+came from. This is worth doing explicitly rather than letting the run do it,
+because it is the one input that silently ruins everything downstream: forced
+photometry at the wrong position gives you a light curve of empty sky. Check
+the printed coordinates against the TNS page before going on.
+
+TNS needs a bot key (see "The SN position" above). Without one you get SIMBAD,
+which is coarser and lags TNS badly for objects discovered in the last months.
+
+### 4. Cache the reference catalogues
+
+```bash
+tjophot fetch-catalog SN2027xyz
+```
+
+Read the star counts it prints, per band. The pipeline needs at least a handful
+of usable calibrators per frame; a field with two APASS B stars will produce B
+magnitudes that are technically calibrated and practically worthless. Gaia
+synthetic photometry covers griz well almost everywhere. B and V come from
+APASS, which thins out at high galactic latitude -- if the counts look thin
+there, expect `few_cal_stars` and large `zp_err` in those bands, and plan to
+lean on `recalibrate`.
+
+### 5. Get the templates and *look at them*
+
+```bash
+tjophot fetch-template SN2027xyz
+```
+
+Then open `runs/SN2027xyz/templates/template_*.png`. Each preview puts the
+template and one of your own science frames side by side, on a common
+North-up, East-left grid, with the target marked in both. Two things to
+confirm, per band:
+
+- the supernova is plainly inside the marker on the science panel;
+- it is **absent** from the template panel.
+
+A template containing the supernova subtracts away the signal you are trying to
+measure, and no amount of later processing recovers it. This is the single
+worst failure mode in the whole pipeline and the preview is the only thing that
+catches it.
+
+Also watch the `% valid` figure. PS1 cutouts come from tiled skycells and a
+field near a tile edge can come back with a blank strip; the pipeline mosaics
+the neighbours automatically, but if `% valid` is still well below 100 the
+stamp has a hole in it.
+
+For B and V there is no Pan-STARRS counterpart, so decide between the
+photographic DSS2 template and a cross-band PS1 one by measuring it on your own
+field rather than arguing about it:
+
+```bash
+tjophot fetch-template SN2027xyz --compare --bands B V
+```
+
+It differences each candidate against one of your frames and prints the reduced
+chi-square. Lower wins; near 1 means the residual is consistent with photon
+noise. Set the winner in the target file.
+
+If the field is south of Dec -30, Pan-STARRS does not reach it at all: drop
+`panstarrs` from `reference_sources` and give each band a HiPS survey that does
+cover it (SkyMapper, DECaLS).
+
+### 6. A short trial run
+
+```bash
+tjophot run SN2027xyz --max-images 6
+```
+
+Six frames, a couple of minutes. Then look at two or three panels in
+`runs/SN2027xyz/qa/`. Each one shows the science stamp, the template, the
+difference, the curve of growth and the zero-point fit. What you are checking:
+the difference stamp is flat apart from the supernova, the curve of growth
+flattens out, and the zero-point fit is a tight line rather than a scatter
+plot. If those look right on six frames they will look right on two hundred.
+
+### 7. The full run
+
+```bash
+./full-run.sh SN2027xyz
+```
+
+This repeats steps 3-6 in order and then measures everything. Steps 3-5 are
+cached, so the repetition is free. Roughly 20 minutes for 150 frames.
+
+To re-run later without re-downloading anything, `tjophot run SN2027xyz
+--clean` is the short form.
+
+### 8. Read the output
+
+Everything is in `runs/SN2027xyz/`. In the order worth looking at them:
+
+1. `SN2027xyz_diagnostics.png` -- seeing, zero point and depth across the
+   campaign. Bad nights are obvious here and nowhere else.
+2. `SN2027xyz_lightcurve.png` -- filled circles are directly calibrated,
+   open circles are zero points transferred from another band that night.
+3. `SN2027xyz_lightcurve.csv` -- one row per epoch. Always read `flags_str`
+   alongside `mag`; `zp_err` is the honest uncertainty and the flags say how
+   the number was arrived at.
+4. `run.log` when any of the above surprises you.
+
+The run finishes by transferring zero points to any frame that could not fit
+one, so `recalibrate` is normally already done. Run it by hand only after you
+change a calibration setting.
+
+### 9. Later: replace the borrowed templates
+
+Once the supernova has faded, take your own deep B and V frames of the field.
+Same telescope, same filters, same pixel scale, no colour term -- strictly
+better than anything downloaded. Point the target file at them and re-run:
+
+```yaml
+subtraction:
+  reference_files:
+    B: ~/Desktop/TJO/refs/SN2027xyz_ref_B.fits
+    V: ~/Desktop/TJO/refs/SN2027xyz_ref_V.fits
+```
+
+Or let the pipeline stack late-time epochs itself with an MJD window under
+`subtraction.tjo_stack` -- but only once the supernova is genuinely gone, not
+merely faint. At 4 magnitudes below peak it still contributes a couple of per
+cent of the peak flux, which is enough to bias exactly the late-time points you
+built the template for.
+
+### The short version
+
+```bash
+mkdir -p ~/Desktop/TJO/finalfiles/SN2027xyz   # frames here
+tjophot list SN2027xyz                        # check they are found
+cp targets/TEMPLATE.yaml targets/SN2027xyz.yaml
+$EDITOR targets/SN2027xyz.yaml                # set target.name
+tjophot resolve SN2027xyz --write             # position from TNS
+tjophot fetch-catalog SN2027xyz               # check the star counts
+tjophot fetch-template SN2027xyz              # LOOK AT THE PREVIEWS
+tjophot run SN2027xyz --max-images 6          # trial; check runs/*/qa/
+./full-run.sh SN2027xyz                       # the real thing
+```
 
 ## Frames that came back with no zero point
 
