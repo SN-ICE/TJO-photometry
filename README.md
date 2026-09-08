@@ -2,13 +2,18 @@
 
 [![License: BSD 3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
 
-A supernova photometry pipeline for the Telescopi Joan Oro (TJO/MEIA2), built on
+A supernova photometry pipeline for the Telescopi Joan Oro (TJO), built on
 astropy and photutils. It takes a directory of reduced TJO frames and produces a
 calibrated, multi-band light curve with per-epoch diagnostics.
 
 Nothing in it is specific to one supernova: point it at any target directory and
 it will work out the bands, the epochs, the seeing, the zero points and the
-reference images by itself.
+reference images by itself. It handles both TJO cameras, MEIA2 and MEIA3, and
+picks the right one per frame.
+
+`snname` below stands for the target's name -- its name on TNS, which is also
+the name of its directory under `paths.data_root` and of its file in `targets/`.
+Substitute your own.
 
 ---
 
@@ -18,20 +23,20 @@ reference images by itself.
 cd ~/Desktop/TJO/pipeline
 pip install -e .                         # -e matters: it keeps config/ and calib/ live
 
-tjophot build-pattern SN2026acd --extra-dirs ~/Desktop/TJO/2023ixf/ph   # once per instrument
-./full-run.sh SN2026acd                  # clean, resolve, fetch, measure
+tjophot build-pattern snname --extra-dirs ~/Desktop/TJO/finalfiles   # once per instrument
+./full-run.sh snname                  # clean, resolve, fetch, measure
 ```
 
 `QUICKSTART.md` covers this in more detail, including how to add a new target.
 
-Outputs land in `runs/SN2026acd/`:
+Outputs land in `runs/snname/`:
 
 | file | contents |
 |---|---|
-| `SN2026acd_lightcurve.csv` | one row per epoch: the adopted measurement |
-| `SN2026acd_photometry_all.csv` | every method for every epoch, for cross-checking |
-| `SN2026acd_lightcurve.png` | the light curve |
-| `SN2026acd_diagnostics.png` | seeing, zero point and depth over the campaign |
+| `snname_lightcurve.csv` | one row per epoch: the adopted measurement |
+| `snname_photometry_all.csv` | every method for every epoch, for cross-checking |
+| `snname_lightcurve.png` | the light curve |
+| `snname_diagnostics.png` | seeing, zero point and depth over the campaign |
 | `qa/<image>.png` | per-epoch panel: stamps, curve of growth, zero-point fit, kernel |
 | `templates/template_<band>.png` | reference and science frame on a common North-up grid |
 | `run_summary.json`, `config_used.yaml`, `run.log` | exactly what was run, including which config files were merged (API keys redacted) |
@@ -116,13 +121,17 @@ magnitude.
 ## Detector patterns
 
 TJO z-band frames carry a strong fringe pattern -- interference of night-sky
-emission lines inside the thinned CCD -- of about +-3 per cent of the sky with a
-wavelength near 100 px, plus a smooth ~1 per cent vignetting bowl present in
-every band. Both are fixed in *detector* coordinates, so they can be measured
-once and removed from every frame:
+emission lines inside the thinned CCD -- of about 5 per cent of the sky
+peak-to-peak with a wavelength near 100 px, plus a ~1 per cent illumination
+residual present in every band. The second is a flat-field residual, not
+vignetting: measured on stacked, source-masked frames the response is flat to
++-1 per cent right out to the corners, with only the outermost row and column
+deviating. There is no shadowed border on MEIA2 to trim. Both patterns are
+fixed in *detector* coordinates, so they can be measured once and removed from
+every frame:
 
 ```bash
-tjophot build-pattern SN2026acd --extra-dirs ~/Desktop/TJO/2023ixf/ph
+tjophot build-pattern snname --extra-dirs ~/Desktop/TJO/finalfiles
 ```
 
 This median-combines source-masked, sky-normalised frames in detector
@@ -143,8 +152,9 @@ bright twilight gradient the fit can latch onto structure that is not the fringe
 pattern.
 
 **What it is worth.** On SN2026acd the z-band 3-sigma limiting magnitude
-improves by **1.2 magnitudes** (17.6 to 19.1) and the SN's own photometric
-errors drop from 0.048 to 0.031 mag. The gain is large because the fringe
+improves by **1.2 to 1.4 magnitudes** and the SN's own photometric errors drop
+by roughly a third to a half (0.048 to 0.031 mag over the campaign; 0.037 to
+0.021 on the six epochs re-measured against the current pattern). The gain is large because the fringe
 amplitude, a few tens of ADU per pixel, is comparable to a faint source once
 integrated over an aperture, and the sky annulus samples a different fringe
 phase than the aperture does. Bands other than z gain little (r: +0.03 mag) and
@@ -212,7 +222,7 @@ pipeline falls back to direct photometry when choosing what to report.
 
 ## Reading the output
 
-`SN2026acd_lightcurve.csv` carries one row per epoch. `method` says how the
+`snname_lightcurve.csv` carries one row per epoch. `method` says how the
 adopted value was measured, in order of preference:
 
 `difference_psf` > `difference_aperture` > `psf` > `aperture`
@@ -236,7 +246,7 @@ residual of the refitted WCS against the reference catalogue (blank if the
 refinement was skipped or rejected), and `pattern_applied` says whether a
 detector pattern was removed from that frame.
 
-`SN2026acd_photometry_all.csv` keeps every method for every epoch. Comparing
+`snname_photometry_all.csv` keeps every method for every epoch. Comparing
 `aperture`, `psf` and `difference_*` for the same epoch is the fastest sanity
 check there is: in an uncrowded field with a faint host they should agree to a
 few hundredths, and where they do not, the host galaxy is the usual reason.
@@ -260,7 +270,7 @@ A target file is where the SN position belongs:
 
 ```yaml
 target:
-  name: SN2026acd
+  name: snname
   ra: "12:12:12.79"      # sexagesimal hours, or decimal degrees
   dec: "+13:13:18.2"
 ```
@@ -280,20 +290,20 @@ supplied coordinates, or `off` to force photometry exactly where you said.
 ## Commands
 
 ```bash
-tjophot list SN2026acd -v                 # epochs, bands, MJD coverage
-tjophot fetch-catalog SN2026acd           # download and cache the catalogues
-tjophot run SN2026acd                     # the full pipeline
-tjophot run SN2026acd --bands g r         # a subset of bands
-tjophot clean SN2026acd                   # remove this target's previous outputs
-tjophot resolve SN2026acd --write         # look the position up on TNS
-tjophot fetch-template SN2026acd          # fetch and inspect the reference images
-tjophot build-pattern SN2026acd           # measure the detector patterns
-tjophot run SN2026acd --no-subtraction    # direct photometry only
-tjophot run SN2026acd --no-astrometry     # keep the header WCS
-tjophot run SN2026acd --no-pattern        # ignore the stored detector patterns
-tjophot run SN2026acd --refresh           # ignore cached catalogues/templates
-tjophot run SN2026acd --skip 40 --append  # resume a long run, merging into the table
-tjophot colorterms SN2026acd              # fit the instrument colour terms
+tjophot list snname -v                 # epochs, bands, MJD coverage
+tjophot fetch-catalog snname           # download and cache the catalogues
+tjophot run snname                     # the full pipeline
+tjophot run snname --bands g r         # a subset of bands
+tjophot clean snname                   # remove this target's previous outputs
+tjophot resolve snname --write         # look the position up on TNS
+tjophot fetch-template snname          # fetch and inspect the reference images
+tjophot build-pattern snname           # measure the detector patterns
+tjophot run snname --no-subtraction    # direct photometry only
+tjophot run snname --no-astrometry     # keep the header WCS
+tjophot run snname --no-pattern        # ignore the stored detector patterns
+tjophot run snname --refresh           # ignore cached catalogues/templates
+tjophot run snname --skip 40 --append  # resume a long run, merging into the table
+tjophot colorterms snname              # fit the instrument colour terms
 ```
 
 `--append` merges a run into an existing table instead of replacing it, keyed on
@@ -354,9 +364,9 @@ matching, the fit, the clipping and the whole output path without any network
 access:
 
 ```bash
-python tests/make_synthetic_catalog.py SN2026acd \
+python tests/make_synthetic_catalog.py snname \
     --data-root ~/Desktop/TJO/finalfiles --mjd 61121
-python -m tjophot.cli run SN2026acd --data-root ~/Desktop/TJO/finalfiles \
+python -m tjophot.cli run snname --data-root ~/Desktop/TJO/finalfiles \
     --config config/test_local.yaml --work-root runs_test
 ```
 

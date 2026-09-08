@@ -73,8 +73,8 @@ position, and records the size of that correction in `run_summary.json`.
 
 ## Detector pattern correction
 
-Built from 29 z-band frames (26 of SN2026acd plus 3 of SN2023ixf, a different
-field) and tested on frames held out of the build:
+Built from 46 z-band frames spanning four fields and 16 months, and tested on
+frames held out of the build:
 
 | held-out frame sky | large-scale sky scatter before | after | flatter by |
 |---|---|---|---|
@@ -84,6 +84,35 @@ field) and tested on frames held out of the build:
 The moonlit frames are not a failure: their large-scale structure is a moon
 gradient, which is not a fixed detector pattern, and the guard described below
 correctly declines to subtract there.
+
+**Worth, in magnitudes.** Six SN2026acd z-band epochs, same frames, three
+treatments:
+
+| pattern | median mag_err | 3-sigma limit |
+|---|---|---|
+| none | 0.037 | 18.13 |
+| 8 frames, a different field | 0.021 | 19.39 |
+| 46 frames, four fields | 0.021 | 19.49 |
+
+The correction is worth 1.4 magnitudes of depth and halves the error on the
+supernova. Which frames it is built from is worth another 0.1 mag -- so having
+a pattern matters far more than having a perfect one.
+
+**How long a pattern lasts.** The amplitude is fitted per frame, so only the
+shape has to hold. Patterns built 2.5 months apart from the same field correlate
+at r = 0.969, against a split-half noise floor of 0.928-0.988 measured *within*
+a single window: the drift is smaller than the noise of measuring it. A pattern
+spanning 2026 corrects frames from 10 months earlier about as well as one
+field's pattern corrects another field's frames. Nothing in 16 months of data
+shows the shape moving, so rebuild after an instrument intervention -- a
+warm-up, a re-coating, a filter change -- rather than on a schedule.
+
+**Build from several fields.** A pattern measured on one field absorbs that
+field's own sky structure and subtracts it back out of every frame of that
+field. On held-out SN2026fvx frames a same-field pattern scored 0.194 in
+residual large-scale scatter against 0.276 for a four-field pattern -- it looks
+better while removing real signal. `build-pattern` warns when all its input
+frames are of one field; the warning is worth heeding.
 
 End to end on eight z-band epochs, with and without the correction:
 

@@ -24,10 +24,14 @@ If pip warns that the `tjophot` script is not on your PATH, either add
 
 ## Running it
 
+Throughout this file `snname` stands for the target's name -- the name it has
+on TNS, which is also the name of its directory under `paths.data_root` and of
+its file in `targets/`. Substitute your own everywhere it appears.
+
 From a clean slate, for one target:
 
 ```bash
-./full-run.sh SN2026acd
+./full-run.sh snname
 ```
 
 Extra flags are split sensibly: options every subcommand understands
@@ -38,37 +42,37 @@ happened. It is a thin wrapper over five commands you can equally run by hand:
 
 ```bash
 # 1. clear out anything left from a previous run of this target
-tjophot clean SN2026acd
+tjophot clean snname
 
-# 2. look the position up on TNS and record it in targets/SN2026acd.yaml
-tjophot resolve SN2026acd --write
+# 2. look the position up on TNS and record it in targets/snname.yaml
+tjophot resolve snname --write
 
 # 3. cache the reference catalogues for the field          (internet, once)
-tjophot fetch-catalog SN2026acd
+tjophot fetch-catalog snname
 
 # 4. fetch the reference images for difference imaging     (internet, once)
-tjophot fetch-template SN2026acd
+tjophot fetch-template snname
 
 # 5. measure the light curve
-tjophot run SN2026acd
+tjophot run snname
 ```
 
 Steps 2-4 are cached, so they cost nothing on a re-run. Step 1 only removes
-`runs/SN2026acd/` -- the downloads and the detector patterns survive, which is
+`runs/snname/` -- the downloads and the detector patterns survive, which is
 what you want when you are iterating on the photometry.
 
 `tjophot run --clean` folds step 1 into step 5, so the shortest honest
 re-run once the field is set up is:
 
 ```bash
-tjophot run SN2026acd --clean
+tjophot run snname --clean
 ```
 
 **Detector patterns** are a property of the camera, not of the target, so they
 sit outside this recipe. Build them once and forget them:
 
 ```bash
-tjophot build-pattern SN2026acd --extra-dirs ~/Desktop/TJO/finalfiles
+tjophot build-pattern snname --extra-dirs ~/Desktop/TJO/finalfiles
 ```
 
 They live in `calib/` and are applied automatically. Rebuild only when a
@@ -78,7 +82,7 @@ below, and `tjophot list` will tell you.
 **Starting genuinely from scratch**, including re-downloading everything:
 
 ```bash
-tjophot clean SN2026acd --all      # add -n first to see what would go
+tjophot clean snname --all      # add -n first to see what would go
 ```
 
 `--all` also deletes this field's cached catalogues and reference images;
@@ -86,7 +90,7 @@ tjophot clean SN2026acd --all      # add -n first to see what would go
 what would be removed without touching anything, and the command refuses to
 delete outside `runs/` and `cache/`.
 
-A full run over SN2026acd's 155 frames takes roughly 20 minutes.
+A full run over about 150 frames takes roughly 20 minutes.
 
 ## Pan-STARRS templates
 
@@ -99,7 +103,7 @@ check it before committing to a run:
 ```
   g: panstarrs  2700x2700 px, 0.250"/px, 100% valid, median 0.3, range -3.1 to 892.4
      cached at  cache/templates/ps1_183.05315+13.22175_g-sdss_2700.fits
-     preview    runs/SN2026acd/templates/template_g.png
+     preview    runs/snname/templates/template_g.png
 ```
 
 **Look at the previews.** Each one shows the full cutout, then the template and
@@ -163,7 +167,7 @@ them all-sky. Three ways round that, best first:
    Which is better is a question about your field, not an argument to have:
 
    ```bash
-   tjophot fetch-template SN2026acd --compare --bands B V
+   tjophot fetch-template snname --compare --bands B V
    ```
 
    builds a difference against each candidate on one of your own frames and
@@ -179,8 +183,8 @@ For option 1, point the target file at the images:
 ```yaml
 subtraction:
   reference_files:
-    B: ~/Desktop/TJO/refs/SN2026acd_ref_B.fits
-    V: ~/Desktop/TJO/refs/SN2026acd_ref_V.fits
+    B: ~/Desktop/TJO/refs/snname_ref_B.fits
+    V: ~/Desktop/TJO/refs/snname_ref_V.fits
 ```
 
 or let the pipeline stack late-time epochs itself with an MJD window under
@@ -240,8 +244,8 @@ itself and writes one pattern per band per configuration. Feed it the whole
 archive so each pattern is measured over several fields:
 
 ```bash
-tjophot build-pattern SN2026acd --extra-dirs ~/Desktop/TJO/finalfiles
-tjophot build-pattern SN2026acd --extra-dirs ~/Desktop/TJO/finalfiles \
+tjophot build-pattern snname --extra-dirs ~/Desktop/TJO/finalfiles
+tjophot build-pattern snname --extra-dirs ~/Desktop/TJO/finalfiles \
     --detectors meia2_1048x1048        # or just one of them
 ```
 
@@ -253,18 +257,18 @@ avoiding.
 
 ## What you get
 
-Everything lands in `runs/SN2026acd/`:
+Everything lands in `runs/snname/`:
 
 | file | what it is |
 |---|---|
-| `SN2026acd_lightcurve.csv` | the light curve: one row per epoch |
-| `SN2026acd_photometry_all.csv` | every method for every epoch |
-| `SN2026acd_lightcurve.png` | the light curve, plotted |
-| `SN2026acd_diagnostics.png` | seeing, zero point and depth over the campaign |
+| `snname_lightcurve.csv` | the light curve: one row per epoch |
+| `snname_photometry_all.csv` | every method for every epoch |
+| `snname_lightcurve.png` | the light curve, plotted |
+| `snname_diagnostics.png` | seeing, zero point and depth over the campaign |
 | `qa/<image>.png` | per-epoch panel: stamps, curve of growth, zero-point fit |
 | `run.log`, `run_summary.json`, `config_used.yaml` | what was actually run |
 
-Start with `run.log` and `SN2026acd_diagnostics.png` when something looks wrong.
+Start with `run.log` and `snname_diagnostics.png` when something looks wrong.
 
 ## The SN position
 
@@ -272,7 +276,7 @@ The pipeline looks the target name up and writes the answer into the target
 file, so this only has to happen once:
 
 ```bash
-tjophot resolve SN2026acd --write
+tjophot resolve snname --write
 ```
 
 It queries the Transient Name Server first, then falls back to SIMBAD. A run
@@ -298,7 +302,7 @@ objects.
 Every command prints which configuration files it merged, in order:
 
 ```
-INFO tjophot.config  configuration: default.yaml + tns.yaml + targets/SN2026acd.yaml
+INFO tjophot.config  configuration: default.yaml + tns.yaml + targets/snname.yaml
 ```
 
 If a setting is not taking effect, that line is the first thing to check. The
@@ -320,15 +324,15 @@ The TNS coordinates are what you want here.
 ## Useful variations
 
 ```bash
-tjophot run SN2026acd --bands g r i          # a subset of bands
-tjophot run SN2026acd --max-images 6         # a quick sanity run
-tjophot run SN2026acd --no-subtraction       # direct photometry only
-tjophot run SN2026acd --no-pattern           # skip the detector-pattern removal
-tjophot run SN2026acd --no-astrometry        # keep the header WCS
-tjophot run SN2026acd --refresh              # ignore cached catalogues/templates
-tjophot run SN2026acd --bands z --append     # redo one band, merge into the table
-tjophot run SN2026acd --skip 80 --append     # resume after an interruption
-tjophot colorterms SN2026acd                 # fit the instrument colour terms
+tjophot run snname --bands g r i          # a subset of bands
+tjophot run snname --max-images 6         # a quick sanity run
+tjophot run snname --no-subtraction       # direct photometry only
+tjophot run snname --no-pattern           # skip the detector-pattern removal
+tjophot run snname --no-astrometry        # keep the header WCS
+tjophot run snname --refresh              # ignore cached catalogues/templates
+tjophot run snname --bands z --append     # redo one band, merge into the table
+tjophot run snname --skip 80 --append     # resume after an interruption
+tjophot colorterms snname                 # fit the instrument colour terms
 ```
 
 Every flag has a config equivalent; `--config my.yaml` merges a file of your own
@@ -342,15 +346,15 @@ mechanical, and 4-8 are what `full-run.sh` does for you.
 ### 1. Put the frames where the pipeline looks
 
 ```bash
-mkdir -p ~/Desktop/TJO/finalfiles/SN2027xyz
+mkdir -p ~/Desktop/TJO/finalfiles/snname
 # copy or link the reduced frames in
-tjophot list SN2027xyz
+tjophot list snname
 ```
 
 `list` is the check that matters: it prints one row per band with the frame
 count and the MJD range. If it says `0 images`, the frames are in the wrong
 place or `paths.data_root` points somewhere else. Files may sit either in
-`<data_root>/SN2027xyz/` or directly in `<data_root>/`; the subdirectory is
+`<data_root>/snname/` or directly in `<data_root>/`; the subdirectory is
 tried first and wins.
 
 Nothing else about the instrument needs setting up. The detector patterns in
@@ -360,7 +364,7 @@ automatically -- rebuild them only if the CCD, filters or binning change.
 ### 2. Write the target file
 
 ```bash
-cp targets/TEMPLATE.yaml targets/SN2027xyz.yaml
+cp targets/TEMPLATE.yaml targets/snname.yaml
 ```
 
 Edit `target.name`. Leave `ra`/`dec` out unless you already know them -- the
@@ -370,7 +374,7 @@ which the next section covers; the defaults are right for a northern field.
 ### 3. Get the position
 
 ```bash
-tjophot resolve SN2027xyz --write
+tjophot resolve snname --write
 ```
 
 Queries TNS, falls back to SIMBAD, and rewrites only the `ra`/`dec` lines of
@@ -386,7 +390,7 @@ which is coarser and lags TNS badly for objects discovered in the last months.
 ### 4. Cache the reference catalogues
 
 ```bash
-tjophot fetch-catalog SN2027xyz
+tjophot fetch-catalog snname
 ```
 
 Read the star counts it prints, per band. The pipeline needs at least a handful
@@ -400,10 +404,10 @@ lean on `recalibrate`.
 ### 5. Get the templates and *look at them*
 
 ```bash
-tjophot fetch-template SN2027xyz
+tjophot fetch-template snname
 ```
 
-Then open `runs/SN2027xyz/templates/template_*.png`. Each preview puts the
+Then open `runs/snname/templates/template_*.png`. Each preview puts the
 template and one of your own science frames side by side, on a common
 North-up, East-left grid, with the target marked in both. Two things to
 confirm, per band:
@@ -426,7 +430,7 @@ photographic DSS2 template and a cross-band PS1 one by measuring it on your own
 field rather than arguing about it:
 
 ```bash
-tjophot fetch-template SN2027xyz --compare --bands B V
+tjophot fetch-template snname --compare --bands B V
 ```
 
 It differences each candidate against one of your frames and prints the reduced
@@ -440,11 +444,11 @@ cover it (SkyMapper, DECaLS).
 ### 6. A short trial run
 
 ```bash
-tjophot run SN2027xyz --max-images 6
+tjophot run snname --max-images 6
 ```
 
 Six frames, a couple of minutes. Then look at two or three panels in
-`runs/SN2027xyz/qa/`. Each one shows the science stamp, the template, the
+`runs/snname/qa/`. Each one shows the science stamp, the template, the
 difference, the curve of growth and the zero-point fit. What you are checking:
 the difference stamp is flat apart from the supernova, the curve of growth
 flattens out, and the zero-point fit is a tight line rather than a scatter
@@ -453,24 +457,24 @@ plot. If those look right on six frames they will look right on two hundred.
 ### 7. The full run
 
 ```bash
-./full-run.sh SN2027xyz
+./full-run.sh snname
 ```
 
 This repeats steps 3-6 in order and then measures everything. Steps 3-5 are
 cached, so the repetition is free. Roughly 20 minutes for 150 frames.
 
-To re-run later without re-downloading anything, `tjophot run SN2027xyz
+To re-run later without re-downloading anything, `tjophot run snname
 --clean` is the short form.
 
 ### 8. Read the output
 
-Everything is in `runs/SN2027xyz/`. In the order worth looking at them:
+Everything is in `runs/snname/`. In the order worth looking at them:
 
-1. `SN2027xyz_diagnostics.png` -- seeing, zero point and depth across the
+1. `snname_diagnostics.png` -- seeing, zero point and depth across the
    campaign. Bad nights are obvious here and nowhere else.
-2. `SN2027xyz_lightcurve.png` -- filled circles are directly calibrated,
+2. `snname_lightcurve.png` -- filled circles are directly calibrated,
    open circles are zero points transferred from another band that night.
-3. `SN2027xyz_lightcurve.csv` -- one row per epoch. Always read `flags_str`
+3. `snname_lightcurve.csv` -- one row per epoch. Always read `flags_str`
    alongside `mag`; `zp_err` is the honest uncertainty and the flags say how
    the number was arrived at.
 4. `run.log` when any of the above surprises you.
@@ -488,8 +492,8 @@ better than anything downloaded. Point the target file at them and re-run:
 ```yaml
 subtraction:
   reference_files:
-    B: ~/Desktop/TJO/refs/SN2027xyz_ref_B.fits
-    V: ~/Desktop/TJO/refs/SN2027xyz_ref_V.fits
+    B: ~/Desktop/TJO/refs/snname_ref_B.fits
+    V: ~/Desktop/TJO/refs/snname_ref_V.fits
 ```
 
 Or let the pipeline stack late-time epochs itself with an MJD window under
@@ -501,15 +505,15 @@ built the template for.
 ### The short version
 
 ```bash
-mkdir -p ~/Desktop/TJO/finalfiles/SN2027xyz   # frames here
-tjophot list SN2027xyz                        # check they are found
-cp targets/TEMPLATE.yaml targets/SN2027xyz.yaml
-$EDITOR targets/SN2027xyz.yaml                # set target.name
-tjophot resolve SN2027xyz --write             # position from TNS
-tjophot fetch-catalog SN2027xyz               # check the star counts
-tjophot fetch-template SN2027xyz              # LOOK AT THE PREVIEWS
-tjophot run SN2027xyz --max-images 6          # trial; check runs/*/qa/
-./full-run.sh SN2027xyz                       # the real thing
+mkdir -p ~/Desktop/TJO/finalfiles/snname   # frames here
+tjophot list snname                        # check they are found
+cp targets/TEMPLATE.yaml targets/snname.yaml
+$EDITOR targets/snname.yaml                # set target.name
+tjophot resolve snname --write             # position from TNS
+tjophot fetch-catalog snname               # check the star counts
+tjophot fetch-template snname              # LOOK AT THE PREVIEWS
+tjophot run snname --max-images 6          # trial; check runs/*/qa/
+./full-run.sh snname                       # the real thing
 ```
 
 ## Frames that came back with no zero point
@@ -525,8 +529,8 @@ APASS away: on the SN2026acd field it kept 2 of 27 B stars, where 0.12 keeps 21.
 **Recover what is left, after the fact:**
 
 ```bash
-tjophot recalibrate SN2026acd -n     # report only
-tjophot recalibrate SN2026acd        # rewrite the tables and plots
+tjophot recalibrate snname -n     # report only
+tjophot recalibrate snname        # rewrite the tables and plots
 ```
 
 This does *not* substitute the band's average zero point. The zero point tracks
