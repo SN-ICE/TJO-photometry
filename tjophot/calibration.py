@@ -33,6 +33,7 @@ class ZeroPoint:
     system: str
     color_name: str = ""
     stars: Optional[Table] = None
+    relaxed: bool = False
     ok: bool = True
     message: str = ""
     meta: dict = field(default_factory=dict)
@@ -90,9 +91,95 @@ def _sigma_clipped_fit(x: np.ndarray, y: np.ndarray, w: np.ndarray, fit_slope: b
     return intercept, slope, intercept_err, slope_err, rms, keep
 
 
+class _Relaxed:
+    """A read-only view of the configuration with a few keys overridden."""
+
+    def __init__(self, cfg, overrides: dict):
+        self._cfg = cfg
+        self._overrides = overrides
+
+    def get(self, dotted, default=None):
+        if dotted in self._overrides:
+            return self._overrides[dotted]
+        return self._cfg.get(dotted, default)
+
+    def resolve_path(self, value):
+        return self._cfg.resolve_path(value)
+
+
+# Tried in order when the strict cuts leave too few calibration stars. Each
+# step trades catalogue precision for numbers: a zero point averaged over ten
+# stars of 0.1 mag beats one from three stars of 0.03, because the scatter
+# averages down while the systematics mostly do not.
+RELAXATION = [
+    {},
+    {"calibration.max_cat_err": 0.10, "calibration.min_snr": 15.0},
+    {"calibration.max_cat_err": 0.20, "calibration.min_snr": 10.0,
+     "calibration.match_radius_arcsec": 2.0},
+    {"calibration.max_cat_err": 0.30, "calibration.min_snr": 8.0,
+     "calibration.match_radius_arcsec": 2.5,
+     "calibration.mag_range": [10.0, 20.5], "calibration.color_term": "none"},
+]
+
+
 def calibrate_image(image, sources: Table, fwhm_px: float, cfg, cache_root: Path,
                     apcor_mag: float = 0.0, refresh: bool = False) -> ZeroPoint:
-    """Fit the zero point of one frame against the best available catalogue."""
+    """Fit a zero point, relaxing the star-selection cuts if it comes up short.
+
+    Two things are traded off. Loosening the cuts admits noisier catalogue
+    entries but more of them; accepting fewer stars keeps the entries clean but
+    leaves the mean poorly determined and outlier rejection blind. Numbers win,
+    so every relaxation level is tried at the full ``min_stars`` before any of
+    them is tried at the reduced floor -- and at the floor the colour term is
+    dropped, since three stars cannot constrain a slope.
+    """
+    min_stars = int(cfg.get("calibration.min_stars", 5))
+    floor = int(cfg.get("calibration.min_stars_floor", 3))
+    relax = bool(cfg.get("calibration.relax_when_short", True))
+
+    ladder = RELAXATION if relax else [{}]
+    targets = [min_stars] if (not relax or floor >= min_stars) else [min_stars, floor]
+
+    last = None
+    for wanted in targets:
+        for level, overrides in enumerate(ladder):
+            settings = dict(overrides)
+            settings["calibration.min_stars"] = wanted
+            if wanted < min_stars:
+                # A handful of stars cannot constrain a colour term as well as
+                # a zero point, and trying makes both worse.
+                settings["calibration.color_term"] = "none"
+            view = _Relaxed(cfg, settings) if settings else cfg
+
+            result = _calibrate_once(image, sources, fwhm_px, view, cache_root,
+                                     apcor_mag=apcor_mag, refresh=refresh)
+            last = result
+            if not result.ok:
+                continue
+
+            result.meta["relaxation_level"] = level
+            result.meta["min_stars_used"] = wanted
+            result.relaxed = level > 0 or wanted < min_stars
+            if result.relaxed:
+                # Few stars means the sigma clipping had little to reject and
+                # the mean rests on a short average; say so in the error.
+                inflation = float(np.sqrt(max(min_stars, 1) / max(result.n_stars, 1)))
+                if result.n_stars < min_stars:
+                    result.zp_err = float(result.zp_err * max(inflation, 1.0))
+                log.info("%s %s: zero point needed relaxed cuts "
+                         "(level %d, %d stars%s)", image.meta.path.name, result.band,
+                         level, result.n_stars,
+                         ", no colour term" if wanted < min_stars else "")
+            return result
+
+    return last if last is not None else ZeroPoint(
+        image.meta.band, float("nan"), float("nan"), 0.0, 0.0, 0.5, 0,
+        float("nan"), "", image.meta.system, ok=False, message="no attempt succeeded")
+
+
+def _calibrate_once(image, sources: Table, fwhm_px: float, cfg, cache_root: Path,
+                    apcor_mag: float = 0.0, refresh: bool = False) -> ZeroPoint:
+    """One pass at the zero point with the cuts exactly as given."""
     band = image.meta.band
     providers = list(cfg.get("calibration.catalogs", ["gaia_synth"]))
     radius = float(cfg.get("calibration.search_radius_arcmin", 9.0))

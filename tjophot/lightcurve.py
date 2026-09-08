@@ -40,6 +40,7 @@ FLAG_IN_TEMPLATE = 128       # this epoch is part of the reference image itself
 FLAG_CROSS_BAND_TEMPLATE = 256   # the template was taken in a different filter
 FLAG_ZP_TRANSFERRED = 512        # zero point borrowed from another band, same night
 FLAG_APPROX_OFFSET = 1024        # recalculated without the exact magnitude offset
+FLAG_RELAXED_CALIBRATION = 2048  # zero point needed loosened star-selection cuts
 
 FLAG_NAMES = {
     FLAG_MASKED_PIXEL: "masked_pixel", FLAG_SATURATED: "saturated",
@@ -48,6 +49,7 @@ FLAG_NAMES = {
     FLAG_POOR_CALIBRATION: "poor_calibration", FLAG_IN_TEMPLATE: "in_template",
     FLAG_CROSS_BAND_TEMPLATE: "cross_band_template",
     FLAG_ZP_TRANSFERRED: "zp_transferred", FLAG_APPROX_OFFSET: "approx_offset",
+    FLAG_RELAXED_CALIBRATION: "relaxed_calibration",
 }
 
 

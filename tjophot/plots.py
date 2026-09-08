@@ -12,6 +12,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from astropy.visualization import ZScaleInterval  # noqa: E402
 
+from .lightcurve import FLAG_ZP_TRANSFERRED  # noqa: E402
 from .utils import get_logger  # noqa: E402
 
 log = get_logger("tjophot.plots")
@@ -180,8 +181,19 @@ def lightcurve(path: Path, frame, target: str, offsets: bool = True) -> Optional
             detected = group[~group["is_limit"].astype(bool) & np.isfinite(group["mag"])]
             limits = group[group["is_limit"].astype(bool) & np.isfinite(group["limit_mag"])]
             label = band + (f" {shift:+.0f}" if shift else "")
-            ax.errorbar(detected["mjd"], detected["mag"] + shift, yerr=detected["mag_err"],
+
+            # A zero point borrowed from another band is a weaker measurement
+            # than a fitted one; draw it open so that is visible on the curve.
+            flags = detected["flags"].fillna(0).astype(int) if "flags" in detected else 0
+            borrowed = (flags & FLAG_ZP_TRANSFERRED) > 0 if np.ndim(flags) else False
+            own = detected[~borrowed] if np.ndim(flags) else detected
+            ax.errorbar(own["mjd"], own["mag"] + shift, yerr=own["mag_err"],
                         fmt="o", ms=4.5, color=color, lw=0.8, capsize=2, label=label)
+            if np.ndim(flags) and borrowed.any():
+                sub = detected[borrowed]
+                ax.errorbar(sub["mjd"], sub["mag"] + shift, yerr=sub["mag_err"],
+                            fmt="o", ms=5.0, mfc="white", mec=color, ecolor=color,
+                            lw=0.8, capsize=2)
             if len(limits):
                 ax.plot(limits["mjd"], limits["limit_mag"] + shift, "v", ms=5,
                         mfc="none", color=color)
@@ -192,7 +204,13 @@ def lightcurve(path: Path, frame, target: str, offsets: bool = True) -> Optional
         ax.set_ylabel("magnitude" + (" (+ offset)" if offsets else ""))
         ax.set_title(f"{target} -- TJO/MEIA2")
         ax.grid(alpha=0.25, lw=0.5)
-        ax.legend(ncol=2, fontsize=9, frameon=False)
+        handles, labels = ax.get_legend_handles_labels()
+        if any((frame["flags"].fillna(0).astype(int) & FLAG_ZP_TRANSFERRED) > 0):
+            from matplotlib.lines import Line2D
+            handles.append(Line2D([], [], marker="o", ls="none", mfc="white",
+                                  mec="#555753", color="#555753", ms=5))
+            labels.append("zero point from\nanother band")
+        ax.legend(handles, labels, ncol=2, fontsize=9, frameon=False)
         fig.tight_layout()
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)

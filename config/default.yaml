@@ -118,6 +118,14 @@ calibration:
   search_radius_arcmin: 9.0
   match_radius_arcsec: 1.5
   min_snr: 20.0
+  min_stars: 5
+  # If the strict cuts leave fewer than min_stars, the catalogue-error, SNR and
+  # matching cuts are loosened in steps and retried; only if that still falls
+  # short is a zero point accepted from as few as min_stars_floor, without a
+  # colour term and with the uncertainty inflated for the short average. Such
+  # frames are flagged relaxed_calibration and few_cal_stars.
+  relax_when_short: true
+  min_stars_floor: 3
   # Catalogue-error cut. A scalar applies to every provider; a mapping sets it
   # per survey, which is what you want: Gaia synthetic photometry is good to
   # millimagnitudes, while APASS B errors are typically 0.05-0.15, so one tight
@@ -125,7 +133,6 @@ calibration:
   max_cat_err:
     default: 0.05
     apass: 0.12
-  min_stars: 5
   mag_range: [11.0, 19.0]
   sigma_clip: 3.0
   color_term: fit              # fit | fixed | none

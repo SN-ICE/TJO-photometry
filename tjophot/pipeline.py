@@ -385,6 +385,8 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
             cal_flags |= lc.FLAG_FEW_CAL_STARS
         if np.isfinite(zp.rms) and zp.rms > float(cfg.get("calibration.max_rms", 0.25)):
             cal_flags |= lc.FLAG_POOR_CALIBRATION
+        if getattr(zp, "relaxed", False):
+            cal_flags |= lc.FLAG_RELAXED_CALIBRATION
     common["flags_base"] = cal_flags
 
     sn_xy = image.pixel_of(coord)
