@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 import numpy as np
 from astropy.coordinates import SkyCoord
@@ -84,8 +84,19 @@ def _float_column(table, name, default=float("nan")):
 # --------------------------------------------------------------------------
 # caching
 # --------------------------------------------------------------------------
+# Query centres are snapped to this grid before they become a cache key, so
+# every frame of a dithered field shares one download instead of fetching its
+# own copy. At 0.01 deg the offset is small against a 9-arcmin search radius.
+CACHE_GRID_DEG = 0.01
+
+
+def _snap(value: float, grid: float = CACHE_GRID_DEG) -> float:
+    return float(np.round(value / grid) * grid)
+
+
 def _cache_path(cache_root: Path, provider: str, ra: float, dec: float,
                 radius_arcmin: float) -> Path:
+    ra, dec = _snap(ra), _snap(dec)
     key = f"{provider}_{ra:.5f}_{dec:.5f}_{radius_arcmin:.3f}"
     digest = hashlib.md5(key.encode()).hexdigest()[:8]
     name = f"{provider}_{ra:.4f}{dec:+.4f}_r{radius_arcmin:.1f}_{digest}.ecsv"
@@ -349,10 +360,28 @@ def get_catalog(provider: str, ra: float, dec: float, radius_arcmin: float,
         if cached is not None:
             return cached
 
-    table = _FETCHERS[provider](ra, dec, radius_arcmin)
+    # Query the grid point too, so the download matches what gets cached.
+    table = _FETCHERS[provider](_snap(ra), _snap(dec), radius_arcmin)
     save_cache(table, cache_root, provider, ra, dec, radius_arcmin)
     log.info("%s: %d sources retrieved", provider, len(table))
     return table
+
+
+def max_error_for(cfg, provider: str) -> float:
+    """The catalogue-error cut, which is properly a per-survey quantity.
+
+    Gaia synthetic photometry is precise to a few millimagnitudes; APASS is a
+    small-telescope all-sky survey whose B errors sit around 0.05-0.15. One cut
+    tight enough for Gaia throws almost all of APASS away -- on the SN2026acd
+    field, 25 of its 27 B stars.
+    """
+    setting = cfg.get("calibration.max_cat_err", 0.05)
+    if isinstance(setting, Mapping):
+        for key, value in setting.items():
+            if str(key).lower() == str(provider).lower():
+                return float(value)
+        return float(setting.get("default", 0.05))
+    return float(setting)
 
 
 def clean_catalog(table: Table, band: str, cfg) -> Table:
@@ -366,7 +395,7 @@ def clean_catalog(table: Table, band: str, cfg) -> Table:
         else np.full(len(table), np.nan)
 
     lo, hi = cfg.get("calibration.mag_range", [10.0, 20.0])
-    max_err = float(cfg.get("calibration.max_cat_err", 0.05))
+    max_err = max_error_for(cfg, table.meta.get("provider", ""))
 
     keep = np.isfinite(mag) & (mag >= float(lo)) & (mag <= float(hi))
     keep &= ~np.isfinite(err) | (err <= max_err)

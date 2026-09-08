@@ -118,7 +118,13 @@ calibration:
   search_radius_arcmin: 9.0
   match_radius_arcsec: 1.5
   min_snr: 20.0
-  max_cat_err: 0.05
+  # Catalogue-error cut. A scalar applies to every provider; a mapping sets it
+  # per survey, which is what you want: Gaia synthetic photometry is good to
+  # millimagnitudes, while APASS B errors are typically 0.05-0.15, so one tight
+  # cut silently discards almost the whole of APASS.
+  max_cat_err:
+    default: 0.05
+    apass: 0.12
   min_stars: 5
   mag_range: [11.0, 19.0]
   sigma_clip: 3.0
@@ -127,7 +133,12 @@ calibration:
   color_term_fixed: {}         # e.g. {g: 0.03, r: -0.02}  (mag per mag of colour)
   color_pivot: {B: 0.65, V: 0.65, g: 0.45, r: 0.35, i: 0.30, z: 0.30}
   zp_error_floor: 0.01
-  max_rms: 0.25                # above this the frame is flagged poor_calibration
+  max_rms: 0.25
+  # Recovering a failed zero point from another band of the same night.
+  transfer_zeropoints: true
+  transfer_min_nights: 3       # nights both bands must share to trust an offset
+  transfer_max_scatter: 0.25   # reject an offset noisier than this (mag)
+  transfer_error_floor: 0.03   # systematic floor on a transferred zero point                # above this the frame is flagged poor_calibration
   limiting_sigma: 3.0
 
 # ---------------------------- template subtraction -------------------------
