@@ -229,7 +229,10 @@ def save_pattern(pattern: Pattern, calib_root: Path) -> Path:
                         header=pattern.header),
         fits.ImageHDU(data=pattern.fringe.astype(np.float32), name="FRINGE"),
     ])
-    hdus.writeto(path, overwrite=True)
+    # Truncate and rewrite in place rather than unlink-and-recreate, so that
+    # rebuilding works on filesystems that allow writing but not deleting.
+    with open(path, "wb") as handle:
+        hdus.writeto(handle)
     log.info("wrote %s", path)
     return path
 
