@@ -32,6 +32,7 @@ from astropy.wcs import WCS
 from astropy.wcs.utils import proj_plane_pixel_scales
 import astropy.units as u
 
+from . import detector
 from .utils import band_token, ensure_dir, get_logger, slugify
 
 log = get_logger("tjophot.templates")
@@ -98,7 +99,8 @@ def build_tjo_stack(images: Sequence, cfg, coord: SkyCoord, band: str,
     min_images = int(cfg.get("subtraction.tjo_stack.min_images", 2))
     combine = str(cfg.get("subtraction.tjo_stack.combine", "median")).lower()
     exclude_science = bool(cfg.get("subtraction.tjo_stack.exclude_science", True))
-    size_arcmin = float(cfg.get("subtraction.cutout_arcmin", 6.0)) * 1.6
+    size_arcmin = detector.stamp_arcmin(
+        cfg, next((im for im in images if im.meta.band == band), None)) * 1.6
 
     chosen = []
     for im in images:
@@ -529,12 +531,15 @@ def linearise_ps1(data: np.ndarray, header: fits.Header) -> np.ndarray:
 # --------------------------------------------------------------------------
 def get_reference(image, cfg, cache_root: Path, coord: SkyCoord,
                   siblings: Sequence, target: str,
-                  refresh: bool = False) -> Optional[ReferenceImage]:
+                  refresh: bool = False,
+                  stamp_arcmin: Optional[float] = None) -> Optional[ReferenceImage]:
     """Return the first reference image that a configured source can provide."""
     band = image.meta.band
     order = cfg.get(f"subtraction.reference_sources.{band}") or \
         cfg.get("subtraction.reference_sources.default") or ["file", "tjo_stack", "panstarrs"]
-    stamp = float(cfg.get("subtraction.cutout_arcmin", 9.0))
+    # One reference serves every epoch in the band, so it is sized for the
+    # widest frame in the run rather than for whichever frame arrived first.
+    stamp = float(stamp_arcmin) if stamp_arcmin else detector.stamp_arcmin(cfg, image)
     # The reference only has to cover the science stamp plus a margin for the
     # reprojection edges; asking PS1 for much more is a slow, large download.
     ps1_size = float(cfg.get("subtraction.panstarrs.size_arcmin", 0) or 0) or stamp * 1.25

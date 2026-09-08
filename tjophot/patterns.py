@@ -31,6 +31,7 @@ import numpy as np
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
 
+from .detector import Detector, identify
 from .utils import band_token, ensure_dir, get_logger
 
 log = get_logger("tjophot.patterns")
@@ -47,6 +48,7 @@ class Pattern:
     shape: tuple[int, int]        # full-frame shape the pattern was built from
     n_frames: int = 0
     header: fits.Header = None
+    detector: Optional[Detector] = None   # the readout this was measured on
 
     @property
     def fringe_amplitude(self) -> float:
@@ -125,25 +127,29 @@ def build_pattern(paths: Sequence[Path], band: str, block: int = 16,
         return None
 
     planes, used, shape = [], [], None
-    binning, offset = 1, (0, 0)
+    binning, offset, detector = 1, (0, 0), None
     for path in paths:
         try:
             with fits.open(path, memmap=False) as hdul:
                 hdu = next((h for h in hdul if getattr(h, "data", None) is not None), hdul[0])
                 data = np.asarray(hdu.data, dtype=float)
                 head = hdu.header
-            if shape is None:
+            here = identify(head)
+            if detector is None:
+                detector = here
                 binning = int(head.get("XFACTOR", 1) or 1)
                 offset = (int(head.get("OFFSET1", 0) or 0), int(head.get("OFFSET2", 0) or 0))
         except Exception as exc:
             log.warning("cannot read %s: %s", Path(path).name, exc)
             continue
+        if here != detector:
+            # Mixing readouts here would average an unrelated fringe field into
+            # the pattern. Group the frames before calling this, not after.
+            log.warning("%s is %s, not %s -- skipped",
+                        Path(path).name, here.label, detector.label)
+            continue
         if shape is None:
             shape = data.shape
-        elif data.shape != shape:
-            log.warning("%s has shape %s, expected %s -- skipped",
-                        Path(path).name, data.shape, shape)
-            continue
 
         mask = _source_mask(data)
         _, sky, _ = sigma_clipped_stats(data, mask=mask, sigma=3.0)
@@ -177,6 +183,8 @@ def build_pattern(paths: Sequence[Path], band: str, block: int = 16,
 
     header = fits.Header()
     header["BAND"] = band
+    header["INSTRUME"] = detector.instrument if detector else "unknown"
+    header["DETECTOR"] = detector.token if detector else "unknown"
     header["NFRAMES"] = len(planes)
     header["BLOCK"] = block
     header["SMOOTHB"] = smooth_blocks
@@ -193,18 +201,29 @@ def build_pattern(paths: Sequence[Path], band: str, block: int = 16,
              band, len(planes), 100 * header["ILLUMPP"], 100 * header["FRNGPP"])
 
     return Pattern(illumination=illumination, fringe=fringe, block=block, band=band,
-                   shape=shape, n_frames=len(planes), header=header)
+                   shape=shape, n_frames=len(planes), header=header, detector=detector)
 
 
 # --------------------------------------------------------------------------
 # storage
 # --------------------------------------------------------------------------
-def pattern_path(calib_root: Path, band: str) -> Path:
-    return ensure_dir(Path(calib_root)) / f"pattern_{band_token(band)}.fits"
+def pattern_path(calib_root: Path, band: str, detector: Optional[Detector] = None) -> Path:
+    """Where a pattern lives.
+
+    The detector is part of the name because a pattern is only meaningful on
+    the readout it was measured on, and one archive can hold several. Patterns
+    written before this existed have no detector in the name; see
+    :func:`load_pattern` for how those are still honoured.
+    """
+    root = ensure_dir(Path(calib_root))
+    stem = f"pattern_{band_token(band)}"
+    if detector is not None:
+        stem += f"_{detector.token}"
+    return root / f"{stem}.fits"
 
 
 def save_pattern(pattern: Pattern, calib_root: Path) -> Path:
-    path = pattern_path(calib_root, pattern.band)
+    path = pattern_path(calib_root, pattern.band, pattern.detector)
     hdus = fits.HDUList([
         fits.PrimaryHDU(data=pattern.illumination.astype(np.float32),
                         header=pattern.header),
@@ -215,8 +234,21 @@ def save_pattern(pattern: Pattern, calib_root: Path) -> Path:
     return path
 
 
-def load_pattern(calib_root: Path, band: str) -> Optional[Pattern]:
-    path = pattern_path(calib_root, band)
+def load_pattern(calib_root: Path, band: str,
+                 detector: Optional[Detector] = None) -> Optional[Pattern]:
+    """The pattern for this band on this detector, or None.
+
+    A pattern named for the detector wins. Failing that, a legacy
+    ``pattern_<band>.fits`` from before patterns were keyed this way is
+    accepted, but only if its recorded geometry matches -- an unlabelled
+    pattern is not a pattern for every camera.
+    """
+    path = pattern_path(calib_root, band, detector)
+    if not path.exists() and detector is not None:
+        legacy = pattern_path(calib_root, band, None)
+        if not legacy.exists():
+            return None
+        path = legacy
     if not path.exists():
         return None
     try:
@@ -225,10 +257,28 @@ def load_pattern(calib_root: Path, band: str) -> Optional[Pattern]:
             header = hdul[0].header
             fringe = np.asarray(hdul["FRINGE"].data, dtype=float) \
                 if "FRINGE" in hdul else np.zeros_like(illumination)
+        stored = None
+        if header.get("INSTRUME"):
+            stored = Detector(instrument=str(header["INSTRUME"]).strip(),
+                              ny=int(header.get("FULLNY", 0) or 0),
+                              nx=int(header.get("FULLNX", 0) or 0),
+                              binning=int(header.get("XBINNING", 1) or 1))
+        if detector is not None:
+            if stored is not None and stored != detector:
+                log.warning("%s was measured on %s, not %s -- ignored",
+                            path.name, stored.label, detector.label)
+                return None
+            # A legacy pattern names no camera, but it does record its shape.
+            want = (int(header.get("FULLNY", 0) or 0), int(header.get("FULLNX", 0) or 0))
+            if stored is None and want != (0, 0) and want != (detector.ny, detector.nx):
+                log.debug("%s was measured on a %dx%d readout, not %s -- ignored",
+                          path.name, want[1], want[0], detector.label)
+                return None
         return Pattern(illumination=illumination, fringe=fringe,
                        block=int(header.get("BLOCK", 16)), band=band,
                        shape=(int(header.get("FULLNY", 0)), int(header.get("FULLNX", 0))),
-                       n_frames=int(header.get("NFRAMES", 0)), header=header)
+                       n_frames=int(header.get("NFRAMES", 0)), header=header,
+                       detector=stored or detector)
     except Exception as exc:
         log.warning("could not read %s: %s", path, exc)
         return None

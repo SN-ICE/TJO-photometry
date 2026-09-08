@@ -23,6 +23,8 @@ from astropy.table import Table
 import astropy.units as u
 
 from . import astrometry as astrom
+from . import detector as det_mod
+from .detector import Detector, identify
 from . import catalogs as cat
 from . import lightcurve as lc
 from . import nameresolve
@@ -48,13 +50,18 @@ class EpochIndex:
     band: str
     object_name: str
     exptime: float
+    detector: Optional[Detector] = None
 
 
 def index_images(paths: Iterable[Path], instrument: dict,
-                 target: Optional[str] = None) -> list[EpochIndex]:
-    """Read headers only and build the epoch list."""
-    hmap = instrument.get("header", {})
-    filters = instrument.get("filters", {})
+                 target: Optional[str] = None, cfg=None) -> list[EpochIndex]:
+    """Read headers only and build the epoch list.
+
+    When *cfg* is given, each frame's instrument definition is chosen from its
+    own INSTRUME header, so an archive spanning a camera change is indexed
+    correctly rather than through one camera's assumptions.
+    """
+    chooser = getattr(cfg, "instrument_for", None) if cfg is not None else None
     index: list[EpochIndex] = []
     for path in sorted(paths):
         try:
@@ -62,6 +69,9 @@ def index_images(paths: Iterable[Path], instrument: dict,
         except Exception as exc:
             log.warning("cannot read %s: %s", path, exc)
             continue
+        this = chooser(header) if callable(chooser) else instrument
+        hmap = this.get("header", {})
+        filters = this.get("filters", {})
         raw = str(first_header_value(header, hmap.get("filter", ["FILTER"]), "")).strip()
         band = filters.get(raw, filters.get(raw.replace("SDSS ", ""), raw))
         mjd = first_header_value(header, hmap.get("mjd", ["MJD-OBS"]))
@@ -72,7 +82,8 @@ def index_images(paths: Iterable[Path], instrument: dict,
         if target and name and name.lower() != target.lower():
             continue
         index.append(EpochIndex(Path(path), float(mjd), band, name,
-                                float(first_header_value(header, hmap.get("exptime", ["EXPTIME"]), 1.0))))
+                                float(first_header_value(header, hmap.get("exptime", ["EXPTIME"]), 1.0)),
+                                identify(header)))
     return sorted(index, key=lambda e: (e.band, e.mjd))
 
 
@@ -149,7 +160,7 @@ def refine_target_coord(coord: SkyCoord, cfg, index: Sequence[EpochIndex], instr
             break
         try:
             image = prepare_image(entry.path, cfg, instrument,
-                                  pattern=patterns.get(entry.band),
+                                  pattern=pattern_for(patterns, entry.band, entry.detector),
                                   astrometry_ref=astrometry_ref)
             if not image.contains(coord, margin=40):
                 continue
@@ -222,22 +233,47 @@ def prepare_image(path: Path, cfg, instrument: dict, pattern=None,
     return image
 
 
-def load_patterns(cfg, bands: Sequence[str]) -> dict:
-    """Detector patterns for the bands that have one stored."""
+def load_patterns(cfg, bands: Sequence[str],
+                  detectors: Optional[Iterable[Detector]] = None) -> dict:
+    """Stored detector patterns, keyed by ``(band, detector)``.
+
+    A pattern belongs to one readout, so a run spanning two of them needs two
+    patterns per band. Missing ones are reported rather than silently skipped:
+    an uncorrected z-band frame is about a magnitude shallower than a corrected
+    one, which is worth knowing before reading the light curve.
+    """
     if not bool(cfg.get("image.pattern.enabled", True)):
         return {}
     calib_root = _calib_root(cfg)
-    out = {}
-    for band in bands:
-        pattern = pat.load_pattern(calib_root, band)
-        if pattern is not None:
-            out[band] = pattern
-            log.info("%s: using stored detector pattern (%d frames, illumination %.2f%% pp, "
-                     "fringe %.2f%% pp)", band, pattern.n_frames,
+    detectors = list(detectors or [None])
+    out: dict = {}
+    missing: list[str] = []
+    for detector in detectors:
+        for band in bands:
+            pattern = pat.load_pattern(calib_root, band, detector)
+            if pattern is None:
+                missing.append(f"{band} on {detector.label if detector else 'this detector'}")
+                continue
+            out[(band, detector)] = pattern
+            log.info("%s on %s: stored pattern (%d frames, illumination %.2f%% pp, "
+                     "fringe %.2f%% pp)", band,
+                     detector.label if detector else "the detector", pattern.n_frames,
                      100 * pattern.illumination_amplitude, 100 * pattern.fringe_amplitude)
+    if missing:
+        log.warning("no detector pattern for %s -- those frames keep their fringes. "
+                    "Build them with 'tjophot build-pattern'.", "; ".join(missing))
     if not out:
         log.info("no stored detector patterns; run 'tjophot build-pattern' to make them")
     return out
+
+
+def pattern_for(patterns: dict, band: str, detector: Optional[Detector] = None):
+    """Look a pattern up, tolerating a dict keyed the old way (band only)."""
+    if not patterns:
+        return None
+    if (band, detector) in patterns:
+        return patterns[(band, detector)]
+    return patterns.get(band)
 
 
 def _calib_root(cfg) -> Path:
@@ -248,15 +284,22 @@ def _calib_root(cfg) -> Path:
 
 
 def load_astrometry_reference(cfg, coord: SkyCoord, cache_root: Path,
-                              refresh: bool = False):
-    """Reference catalogue for the WCS refinement, with fallbacks."""
+                              refresh: bool = False,
+                              field_arcmin: Optional[float] = None):
+    """Reference catalogue for the WCS refinement, with fallbacks.
+
+    One catalogue serves the whole run, so when the run spans detectors it is
+    sized for the largest of them.
+    """
     mode = str(cfg.get("astrometry.mode", "linear")).lower()
     if mode in ("off", "none"):
         return None
 
     providers = [cfg.get("astrometry.catalog", "gaia_astrometry")]
     providers += list(cfg.get("astrometry.fallback_catalogs", []) or [])
-    radius = float(cfg.get("astrometry.search_radius_arcmin", 10.0))
+    radius = det_mod.resolve_size(cfg.get("astrometry.search_radius_arcmin", "auto"),
+                                  field_arcmin if field_arcmin else 10.0,
+                                  fraction=1.05, lo=3.0, hi=30.0, default=10.0)
     local_path = cfg.resolve_path(cfg.get("calibration.local_catalog"))
 
     for provider in providers:
@@ -276,7 +319,7 @@ def load_astrometry_reference(cfg, coord: SkyCoord, cache_root: Path,
 def build_references(cfg, index: Sequence[EpochIndex], instrument: dict, coord: SkyCoord,
                      target: str, cache_root: Path, bands: Sequence[str],
                      refresh: bool = False, patterns: Optional[dict] = None,
-                     astrometry_ref=None) -> dict:
+                     astrometry_ref=None, stamp_arcmin: Optional[float] = None) -> dict:
     """One reference image per band, built once and reused for every epoch."""
     references: dict[str, Optional[tpl.ReferenceImage]] = {}
     max_images = int(cfg.get("subtraction.tjo_stack.max_images", 8))
@@ -302,14 +345,15 @@ def build_references(cfg, index: Sequence[EpochIndex], instrument: dict, coord: 
                     try:
                         siblings.append(prepare_image(
                             entry.path, cfg, instrument,
-                            pattern=(patterns or {}).get(band),
+                            pattern=pattern_for(patterns, band, entry.detector),
                             astrometry_ref=astrometry_ref))
                     except Exception as exc:
                         log.warning("template epoch %s failed: %s", entry.path.name, exc)
 
         try:
             references[band] = tpl.get_reference(
-                _FakeImage(band), cfg, cache_root, coord, siblings, target, refresh=refresh)
+                _FakeImage(band), cfg, cache_root, coord, siblings, target,
+                refresh=refresh, stamp_arcmin=stamp_arcmin)
         except Exception as exc:
             log.warning("reference for band %s failed: %s", band, exc)
             references[band] = None
@@ -349,6 +393,7 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
         quality=str(image.meta.extra.get("quality", "")), image=image.meta.path.name,
         astrom_rms_arcsec=image.qa.get("astrom_rms_arcsec", np.nan),
         astrom_nstars=image.qa.get("astrom_nstars", np.nan),
+        detector=identify(image.header).label,
         pattern_applied=bool(image.qa.get("pattern_applied", False)),
         fringe_scale_adu=image.qa.get("pattern_fringe_scale_adu", np.nan),
     )
@@ -631,7 +676,7 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
     paths = find_images(cfg, target)
     if not paths:
         raise RuntimeError(f"no FITS files found for {target} under {cfg.data_root}")
-    full_index = index_images(paths, instrument, target=None)
+    full_index = index_images(paths, instrument, target=None, cfg=cfg)
     if bands:
         full_index = [e for e in full_index if e.band in bands]
     # Templates are always built from every available epoch, even when the run
@@ -664,8 +709,28 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
         elif not explicit:
             log.info("name resolution found nothing; falling back to the telescope pointing")
 
-    patterns = load_patterns(cfg, present)
-    astrometry_ref = load_astrometry_reference(cfg, coord, cache_root, refresh=refresh)
+    detectors = sorted({e.detector for e in index if e.detector is not None},
+                       key=lambda d: d.token)
+    if len(detectors) > 1:
+        log.info("%d detector configurations in this run: %s", len(detectors),
+                 "; ".join(f"{d.label} ({sum(1 for e in index if e.detector == d)} frames)"
+                           for d in detectors))
+    patterns = load_patterns(cfg, present, detectors)
+    # Size the astrometric reference for the widest frame in the run. The
+    # nominal plate scale from each detector's instrument file is enough here:
+    # this only sets how much sky to download.
+    def _nominal_scale(det) -> float:
+        inst = cfg.instrument_for({"INSTRUME": det.instrument}) \
+            if hasattr(cfg, "instrument_for") else instrument
+        return float((inst.get("defaults", {}) or {}).get("pixel_scale", 0.4)) * det.binning
+
+    widest = max((det_mod.field_radius_arcmin(d.nx, d.ny, _nominal_scale(d))
+                  for d in detectors), default=10.0)
+    # One reference stamp per band for the whole run, sized for its widest frame.
+    reference_stamp = max((det_mod.stamp_arcmin(cfg, detector=d, pixel_scale=_nominal_scale(d))
+                           for d in detectors), default=det_mod.stamp_arcmin(cfg))
+    astrometry_ref = load_astrometry_reference(cfg, coord, cache_root, refresh=refresh,
+                                               field_arcmin=widest)
 
     refine = str(cfg.get("target.refine", "auto")).lower()
     offset = float("nan")
@@ -681,7 +746,8 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
     if bool(cfg.get("subtraction.enabled", True)) and not skip_subtraction:
         references = build_references(cfg, full_index, instrument, coord, target, cache_root,
                                       present, refresh=refresh, patterns=patterns,
-                                      astrometry_ref=astrometry_ref)
+                                      astrometry_ref=astrometry_ref,
+                                      stamp_arcmin=reference_stamp)
 
     rows: list[dict] = []
     failures: list[dict] = []
@@ -689,7 +755,7 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
         log.info("[%d/%d] %s", k, len(index), entry.path.name)
         try:
             image = prepare_image(entry.path, cfg, instrument,
-                                  pattern=patterns.get(entry.band),
+                                  pattern=pattern_for(patterns, entry.band, entry.detector),
                                   astrometry_ref=astrometry_ref)
             if not image.contains(coord, margin=int(cfg.get("image.edge_margin_px", 24))):
                 raise RuntimeError("the target position falls outside this frame")

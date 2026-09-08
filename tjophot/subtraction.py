@@ -24,6 +24,8 @@ from astropy.wcs import WCS
 import astropy.units as u
 from scipy.signal import fftconvolve
 
+from . import detector
+
 from .utils import get_logger
 
 log = get_logger("tjophot.subtraction")
@@ -232,7 +234,7 @@ def subtract(image, reference, cfg, coord: SkyCoord,
     """Resample the reference onto the science frame and PSF-match it away."""
     from reproject import reproject_interp
 
-    size_arcmin = float(cfg.get("subtraction.cutout_arcmin", 6.0))
+    size_arcmin = detector.stamp_arcmin(cfg, image)
     fwhm_px = float(fwhm_px or image.fwhm_px or 4.0)
 
     # --- science stamp ---------------------------------------------------

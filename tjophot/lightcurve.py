@@ -20,7 +20,7 @@ COLUMNS = [
     "cal_provider", "cal_nstars", "cal_rms", "mag_offset",
     "apcor", "apcor_err", "aperture_radius_px",
     "fwhm_arcsec", "sky_adu", "sky_rms_adu", "exptime", "airmass",
-    "astrom_rms_arcsec", "astrom_nstars", "pattern_applied", "fringe_scale_adu",
+    "astrom_rms_arcsec", "astrom_nstars", "detector", "pattern_applied", "fringe_scale_adu",
     "ref_source", "ref_band", "ref_nimages", "diff_mode", "diff_chi2", "diff_kernel_sum", "diff_nstamps",
     "x", "y", "dx", "dy", "flags", "quality", "image",
 ]
@@ -172,7 +172,7 @@ def write(frame: pd.DataFrame, outdir: Path, target: str,
         "target", "mjd", "band", "system", "mag", "mag_err", "limit_mag", "is_limit",
         "flux", "flux_err", "snr", "zp", "zp_err", "zp_source", "fwhm_arcsec",
         "astrom_rms_arcsec",
-        "pattern_applied", "method",
+        "detector", "pattern_applied", "method",
         "cal_provider", "cal_nstars", "cal_rms", "ref_source", "flags", "flags_str", "image",
     ]]
     slim.to_csv(lc_path, index=False, float_format="%.6f")

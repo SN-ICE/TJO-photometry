@@ -1,0 +1,75 @@
+# Telescopi Joan Oro (OAdM) + MEIA3 CCD
+#
+# MEIA3 replaced MEIA2 during 2025. It is a different camera, not a different
+# readout of the same one: coarser pixels, a wider field, roughly twice the
+# gain and slightly lower read noise. Frames are written as a 3108 x 3108
+# window of a 4096 x 4096 detector (IMAGEW/IMAGEH record the full chip).
+#
+#   MEIA2   2048 x 2048   0.361 "/px   12.3'   gain 1.04   RON 9.0
+#   MEIA3   3108 x 3108   0.402 "/px   20.8'   gain 1.94   RON 8.3
+#
+# The header mapping and the filter set are unchanged, so only the numbers
+# below differ from tjo_meia2.yaml.
+name: TJO/MEIA3
+telescope: TJO
+site: OAdM
+
+header:
+  mjd: [MJD-OBS]
+  jd: [JD]
+  dateobs: [DATE-OBS]
+  timeobs: [TIME-OBS]
+  exptime: [EXPTIME]
+  filter: [FILTER]
+  object: [OBJECT, TARGET]
+  gain: [GAIN]                 # e- per ADU
+  readnoise: [RDNOISE]         # e-
+  target_ra: [OBJRA, RA]       # sexagesimal hours
+  target_dec: [OBJDEC, DEC]    # sexagesimal degrees
+  binning_x: [XFACTOR]
+  binning_y: [YFACTOR]
+  airmass: [AIRMASS]
+  imagetype: [IMAGETYP, OBSTYPE]
+  quality: [IMGQS]
+
+defaults:
+  gain: 1.94                   # header GAIN is used when present; this is the fallback
+  readnoise: 8.3
+  pixel_scale: 0.402           # arcsec/px, unbinned; only used if WCS is absent
+  # MEIA3 appears to be well-limited rather than ADC-limited: across 197 frames
+  # in this archive no pixel exceeds ~58600 ADU, where MEIA2 reaches ~66000.
+  # 50000 keeps the same ~85 per cent margin the MEIA2 value uses. If you have
+  # the camera's real full-well figure, put it here instead -- this one is
+  # inferred from the data.
+  saturation_adu: 50000
+
+filters:
+  "B": B
+  "V": V
+  "R": R
+  "I": I
+  "U": U
+  "SDSS u": u
+  "SDSS g": g
+  "SDSS r": r
+  "SDSS i": i
+  "SDSS z": z
+  "u": u
+  "g": g
+  "r": r
+  "i": i
+  "z": z
+  "Clear": C
+  "None": C
+
+systems:
+  U: vega
+  B: vega
+  V: vega
+  R: vega
+  I: vega
+  u: ab
+  g: ab
+  r: ab
+  i: ab
+  z: ab

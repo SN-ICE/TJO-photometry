@@ -64,15 +64,16 @@ re-run once the field is set up is:
 tjophot run SN2026acd --clean
 ```
 
-**Detector patterns** are a property of the instrument, not of the target, so
-they sit outside this recipe. Build them once and forget them:
+**Detector patterns** are a property of the camera, not of the target, so they
+sit outside this recipe. Build them once and forget them:
 
 ```bash
-tjophot build-pattern SN2026acd --extra-dirs ~/Desktop/TJO/2023ixf/ph
+tjophot build-pattern SN2026acd --extra-dirs ~/Desktop/TJO/finalfiles
 ```
 
-Rebuild only if the camera changes -- a new CCD, a new filter, different
-binning. They live in `calib/` and are applied automatically.
+They live in `calib/` and are applied automatically. Rebuild only when a
+readout configuration appears that has none -- see "More than one camera"
+below, and `tjophot list` will tell you.
 
 **Starting genuinely from scratch**, including re-downloading everything:
 
@@ -190,6 +191,65 @@ A same-filter template that still contains the supernova is *worse* than a
 clean cross-band one: it subtracts the signal you are trying to measure, and
 nothing downstream can recover it. That is why PS1 is listed ahead of
 `tjo_stack` for B and V in the SN2026acd target file.
+
+## More than one camera
+
+A TJO archive is not one instrument. Frames in this one come from three
+different readout configurations:
+
+| | array | scale | field | gain | read noise |
+|---|---|---|---|---|---|
+| MEIA2, windowed | 1048 x 1048 | 0.361 "/px | 6.3' | 1.04 | 9.0 |
+| MEIA2, full frame | 2048 x 2048 | 0.361 "/px | 12.3' | 1.04 | 9.0 |
+| MEIA3 | 3108 x 3096 | 0.402 "/px | 20.8' | 1.94 | 8.3 |
+
+The first two are the same chip read out through different windows; the third
+is a different camera. A single campaign can straddle either change -- SN2025few
+switches from the 1048 window to full frame at MJD 61013, mid-light-curve.
+
+The pipeline works this out per frame, from `INSTRUME` and the array size, and
+everything that depends on it follows automatically:
+
+* **gain, read noise, plate scale and saturation** come from the frame's own
+  instrument file, chosen through the `instruments:` map in `config/default.yaml`;
+* **detector patterns** are stored per readout, as
+  `calib/pattern_<band>_<detector>.fits`, because a fringe pattern is fixed in
+  detector coordinates and is meaningless on an array of another size. TJO
+  records `OFFSET1 = OFFSET2 = 0` even for a windowed readout, so where the
+  window sits on the chip is not recoverable from the header -- which is why a
+  full-frame pattern is not cropped onto a subframe, but measured separately;
+* **catalogue search radii and stamp sizes** default to `auto` and are derived
+  from the frame's own field of view, snapped to whole arcmin so the download
+  cache stays small. A fixed 9 arcmin radius covers a 12.3' frame but wastes
+  most of its stars on a 6.3' one and misses half of a 20.8' one.
+
+`tjophot list` shows the split, and says which patterns are still missing:
+
+```
+2 detector configurations:
+  detector                    N    MJD first     MJD last  bands
+  MEIA2 1048x1048            81   60786.9465   61011.1862  B,V,g,i,r,z
+  MEIA2 2048x2048            40   61017.1079   61134.0660  B,V,g,i,r
+```
+
+Every epoch records the camera it came from in the `detector` column of the
+output tables, so a step in the light curve can be checked against the swap.
+
+Building patterns for a new readout is the same command; it groups the frames
+itself and writes one pattern per band per configuration. Feed it the whole
+archive so each pattern is measured over several fields:
+
+```bash
+tjophot build-pattern SN2026acd --extra-dirs ~/Desktop/TJO/finalfiles
+tjophot build-pattern SN2026acd --extra-dirs ~/Desktop/TJO/finalfiles \
+    --detectors meia2_1048x1048        # or just one of them
+```
+
+Adding a camera the pipeline has not seen means two edits: a new file in
+`config/instruments/`, and a line in the `instruments:` map naming it. Without
+them the run still works, but it warns and falls back to the default
+instrument's numbers, which is exactly the silent-wrong-answer case worth
+avoiding.
 
 ## What you get
 

@@ -4,7 +4,15 @@
 # per-target file in targets/<NAME>.yaml (merged on top of this one).
 # ---------------------------------------------------------------------------
 
+# Fallback instrument, used when a frame's INSTRUME is not in the map below.
 instrument: tjo_meia2          # -> config/instruments/<name>.yaml
+
+# INSTRUME header value -> config/instruments/<name>.yaml. Each frame picks its
+# own, so an archive spanning a camera change reduces correctly in one run:
+# gain, read noise, pixel scale and saturation follow the frame, not the run.
+instruments:
+  MEIA2: tjo_meia2
+  MEIA3: tjo_meia3
 
 # Transient Name Server credentials, for looking a target name up. Get a bot at
 # https://www.wis-tns.org/bots . Leave these null and export TNS_API_KEY,
@@ -42,7 +50,9 @@ astrometry:
   mode: linear                 # off | shift | linear | sip
   catalog: gaia_astrometry     # Gaia DR3 positions (deeper than the GSPC subset)
   fallback_catalogs: [gaia_synth, panstarrs, local]
-  search_radius_arcmin: 10.0
+  # 'auto' = a circle just containing the frame, so it follows the camera.
+  # A number here overrides that.
+  search_radius_arcmin: auto
   max_mag: 20.0
   match_radius_arcsec: 3.0     # first pass, generous
   final_match_radius_arcsec: 1.0
@@ -55,7 +65,9 @@ astrometry:
 
 # --------------------------- image preparation -----------------------------
 image:
-  saturation_adu: 55000        # conservative; MEIA2 full well ~65k
+  # null means 'whatever this frame's instrument file says' -- MEIA2 and MEIA3
+  # have different full wells. Set a number here to override both.
+  saturation_adu: null
   edge_margin_px: 24           # ignore this border when detecting/calibrating
   bad_value_mask: [0.0]        # pixel values treated as bad
   pattern:
@@ -115,7 +127,7 @@ photometry:
 # ---------------------------- flux calibration -----------------------------
 calibration:
   catalogs: [gaia_synth, panstarrs, apass]   # tried in order, per band
-  search_radius_arcmin: 9.0
+  search_radius_arcmin: auto     # as above: sized to the frame being calibrated
   match_radius_arcsec: 1.5
   min_snr: 20.0
   min_stars: 5
@@ -194,7 +206,9 @@ subtraction:
   convolve_science_ratio: 1.25 # convolve the science frame only when the reference
                                # seeing is this much worse; a survey stack is
                                # normally sharper than TJO, so this rarely fires
-  cutout_arcmin: 9.0           # size of the working stamp around the SN
+  # size of the working stamp around the SN. 'auto' = 3/4 of the frame width,
+  # clamped to 4-12 arcmin, so a 6.3' subframe and a 20.8' MEIA3 frame both work.
+  cutout_arcmin: auto
                                # (bigger = more stars for the kernel and the PSF)
   max_chi2: 2.5                # above this the difference is flagged as unreliable
   tjo_stack:

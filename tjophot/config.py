@@ -60,6 +60,7 @@ class Config:
 
     def __init__(self, data: Mapping):
         self._data = dict(data)
+        self._warned_instruments: set = set()
 
     # -- construction -------------------------------------------------------
     @classmethod
@@ -106,6 +107,17 @@ class Config:
             inst_path = INSTRUMENT_DIR / f"{instrument}.yaml"
             data["instrument_config"] = load_yaml(inst_path)
 
+        # One archive can hold frames from more than one camera. Load every
+        # instrument named in the map so a frame can pick its own by header.
+        configs = {}
+        for header_value, name in (data.get("instruments") or {}).items():
+            try:
+                configs[str(header_value).strip().upper()] = load_yaml(INSTRUMENT_DIR / f"{name}.yaml")
+            except FileNotFoundError:
+                log.warning("instruments: %r maps to %s.yaml, which does not exist",
+                            header_value, name)
+        data["instrument_configs"] = configs
+
         return cls(data)
 
     # -- access -------------------------------------------------------------
@@ -139,6 +151,32 @@ class Config:
 
     def as_dict(self) -> dict:
         return copy.deepcopy(self._data)
+
+    # -- instruments --------------------------------------------------------
+    def instrument_for(self, header) -> dict:
+        """The instrument definition matching a frame's INSTRUME header.
+
+        Falls back to the configured default instrument, so an archive with a
+        single camera needs no ``instruments`` map at all, and an unrecognised
+        camera still runs -- loudly.
+        """
+        default = self.get("instrument_config", {}) or {}
+        configs = self.get("instrument_configs", {}) or {}
+        if not configs or header is None:
+            return default
+        name = str(header.get("INSTRUME", "") or "").strip().upper()
+        if not name:
+            return default
+        found = configs.get(name)
+        if found is not None:
+            return found
+        if name not in self._warned_instruments:
+            self._warned_instruments.add(name)
+            log.warning("instrument %r is not in the instruments map; "
+                        "using %s. Add it to config/default.yaml if its gain, "
+                        "pixel scale or saturation differ.",
+                        name, default.get("name", self.get("instrument", "the default")))
+        return default
 
     # -- resolved paths -----------------------------------------------------
     def resolve_path(self, value) -> Optional[Path]:

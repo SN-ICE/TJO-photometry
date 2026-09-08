@@ -90,6 +90,11 @@ class ScienceImage:
             data = np.asarray(hdu.data, dtype=float)
             header = hdu.header.copy()
 
+        # The archive can span more than one camera; let the frame pick.
+        chooser = getattr(cfg, "instrument_for", None)
+        if callable(chooser):
+            instrument = chooser(header) or instrument
+
         hmap = instrument.get("header", {})
         defaults = instrument.get("defaults", {})
 
@@ -130,7 +135,8 @@ class ScienceImage:
             gain=float(first_header_value(header, hmap.get("gain", ["GAIN"]), defaults.get("gain", 1.0))),
             readnoise=float(first_header_value(header, hmap.get("readnoise", ["RDNOISE"]),
                                                defaults.get("readnoise", 0.0))),
-            saturation=float(cfg.get("image.saturation_adu", defaults.get("saturation_adu", 60000))),
+            saturation=float(cfg.get("image.saturation_adu")
+                             or defaults.get("saturation_adu", 60000)),
             pixel_scale=pixel_scale,
             target_coord=_sexagesimal_coord(
                 first_header_value(header, hmap.get("target_ra", ["OBJRA"])),

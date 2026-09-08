@@ -81,7 +81,7 @@ def cmd_list(args) -> int:
     setup_logging(args.log_level)
     cfg = _build_config(args)
     paths = find_images(cfg, args.target)
-    index = index_images(paths, cfg.get("instrument_config", {}))
+    index = index_images(paths, cfg.get("instrument_config", {}), cfg=cfg)
     if args.bands:
         index = [e for e in index if e.band in args.bands]
     print(f"{len(index)} images for {args.target} under {cfg.data_root}")
@@ -90,10 +90,40 @@ def cmd_list(args) -> int:
         group = [e for e in index if e.band == band]
         print(f"{band:>5} {len(group):>4} {min(e.mjd for e in group):>12.4f} "
               f"{max(e.mjd for e in group):>12.4f}")
+
+    # A campaign can straddle a camera swap or a change of readout window.
+    # That is not a detail: patterns, plate scale, gain and field size all
+    # follow the detector, so say so plainly rather than leaving it to be
+    # discovered in the light curve.
+    detectors = sorted({e.detector for e in index if e.detector is not None},
+                       key=lambda d: d.token)
+    if len(detectors) > 1:
+        print(f"\n{len(detectors)} detector configurations:")
+        print(f"  {'detector':24} {'N':>4} {'MJD first':>12} {'MJD last':>12}  bands")
+        for det in detectors:
+            group = [e for e in index if e.detector == det]
+            print(f"  {det.label:24} {len(group):>4} {min(e.mjd for e in group):>12.4f} "
+                  f"{max(e.mjd for e in group):>12.4f}  "
+                  f"{','.join(sorted({e.band for e in group}))}")
+        calib_root = None
+        try:
+            from . import pipeline, patterns as pat
+            calib_root = pipeline._calib_root(cfg)
+            missing = [f"{b} on {d.label}"
+                       for d in detectors for b in sorted({e.band for e in index if e.detector == d})
+                       if pat.load_pattern(calib_root, b, d) is None]
+        except Exception:
+            missing = []
+        if missing:
+            print(f"\n  no detector pattern yet for: {', '.join(missing)}")
+            print(f"  build them with:  tjophot build-pattern {args.target}")
+
     if args.verbose:
         print()
         for entry in index:
-            print(f"  {entry.mjd:12.5f} {entry.band:>3} {entry.exptime:6.0f}s  {entry.path.name}")
+            label = entry.detector.label if entry.detector else "?"
+            print(f"  {entry.mjd:12.5f} {entry.band:>3} {entry.exptime:6.0f}s  "
+                  f"{label:20} {entry.path.name}")
     return 0
 
 
@@ -230,7 +260,7 @@ def cmd_clean(args) -> int:
     if args.templates or args.catalogs or args.all:
         try:
             index = pipeline.index_images(pipeline.find_images(cfg, args.target),
-                                          cfg.get("instrument_config", {}))
+                                          cfg.get("instrument_config", {}), cfg=cfg)
             coord, _ = pipeline.resolve_target_coord(cfg, index, cfg.get("instrument_config", {}))
         except Exception as exc:
             log.warning("could not work out the field position (%s); cached downloads "
@@ -327,7 +357,7 @@ def cmd_fetch_catalog(args) -> int:
     setup_logging(args.log_level)
     cfg = _build_config(args)
     paths = find_images(cfg, args.target)
-    index = index_images(paths, cfg.get("instrument_config", {}))
+    index = index_images(paths, cfg.get("instrument_config", {}), cfg=cfg)
     coord, _ = resolve_target_coord(cfg, index, cfg.get("instrument_config", {}))
     radius = float(args.radius or cfg.get("calibration.search_radius_arcmin", 9.0))
 
@@ -366,7 +396,7 @@ def cmd_fetch_template(args) -> int:
     instrument = cfg.get("instrument_config", {})
     cache_root = Path(cfg.cache_root)
 
-    index = pipeline.index_images(pipeline.find_images(cfg, args.target), instrument)
+    index = pipeline.index_images(pipeline.find_images(cfg, args.target), instrument, cfg=cfg)
     if not index:
         print(f"no images found for {args.target}", file=sys.stderr)
         return 1
@@ -375,7 +405,9 @@ def cmd_fetch_template(args) -> int:
 
     bands = args.bands or sorted({e.band for e in index})
     outdir = Path(cfg.work_root) / args.target / "templates"
-    patterns = pipeline.load_patterns(cfg, bands)
+    patterns = pipeline.load_patterns(
+        cfg, bands, sorted({e.detector for e in index if e.detector is not None},
+                           key=lambda d: d.token))
 
     if args.compare:
         return _compare_templates(cfg, args, index, coord, bands, cache_root,
@@ -391,7 +423,8 @@ def cmd_fetch_template(args) -> int:
         stub.meta.mjd = float("nan")
 
         reference = tpl.get_reference(stub, cfg, cache_root, coord, [], args.target,
-                                      refresh=args.refresh)
+                                      refresh=args.refresh,
+                                      stamp_arcmin=_stamp_for(cfg, index, band))
         if reference is None:
             print(f"{band:>3}: no reference available")
             continue
@@ -532,6 +565,21 @@ def _compass(ax, shape, colour: str = "#4e9a06"):
     ax.text(x0 - arm * 1.3, y0, "E", color=colour, ha="right", va="center", fontsize=9)
 
 
+def _stamp_for(cfg, index, band: str) -> float:
+    """Stamp size for a band, sized to the widest frame taken in it."""
+    from . import detector as det_mod
+    dets = [e.detector for e in index if e.band == band and e.detector is not None]
+    if not dets:
+        dets = [e.detector for e in index if e.detector is not None]
+    if not dets:
+        return det_mod.stamp_arcmin(cfg)
+    widest = max(dets, key=lambda d: max(d.nx, d.ny))
+    inst = cfg.instrument_for({"INSTRUME": widest.instrument}) \
+        if hasattr(cfg, "instrument_for") else {}
+    scale = float((inst.get("defaults", {}) or {}).get("pixel_scale", 0.4)) * widest.binning
+    return det_mod.stamp_arcmin(cfg, detector=widest, pixel_scale=scale)
+
+
 def _first_science(cfg, index, band, instrument, patterns):
     """Prepare one science frame of *band*, for side-by-side previews."""
     from . import pipeline
@@ -539,8 +587,9 @@ def _first_science(cfg, index, band, instrument, patterns):
         if entry.band != band:
             continue
         try:
-            return pipeline.prepare_image(entry.path, cfg, instrument,
-                                          pattern=(patterns or {}).get(band))
+            return pipeline.prepare_image(
+                entry.path, cfg, instrument,
+                pattern=pipeline.pattern_for(patterns, band, entry.detector))
         except Exception:
             continue
     return None
@@ -586,13 +635,11 @@ def _compare_templates(cfg, args, index, coord, bands, cache_root, patterns, out
             try:
                 if source == "hips":
                     reference = tpl.fetch_hips_cutout(
-                        coord, band, which,
-                        float(cfg.get("subtraction.cutout_arcmin", 9.0)) * 1.25,
+                        coord, band, which, _stamp_for(cfg, index, band) * 1.25,
                         cache_root, refresh=args.refresh)
                 else:
                     reference = tpl.fetch_panstarrs_cutout(
-                        coord, which,
-                        float(cfg.get("subtraction.cutout_arcmin", 9.0)) * 1.25,
+                        coord, which, _stamp_for(cfg, index, band) * 1.25,
                         cache_root, refresh=args.refresh)
                     if reference is not None:
                         reference.source_band = which
@@ -634,42 +681,76 @@ def cmd_build_pattern(args) -> int:
                 paths.extend(sorted(directory.rglob(pattern_glob)))
         else:
             paths.extend(sorted(Path().glob(str(extra))))
+    # --extra-dirs commonly overlaps the target's own directory; the same frame
+    # counted twice would be weighted twice in the median.
+    seen, unique = set(), []
+    for path in paths:
+        key = Path(path).resolve()
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    paths = unique
     if not paths:
         print("no images found", file=sys.stderr)
         return 1
 
-    index = pipeline.index_images(paths, instrument)
+    index = pipeline.index_images(paths, instrument, cfg=cfg)
     bands = args.bands or sorted({e.band for e in index})
     calib_root = pipeline._calib_root(cfg)
 
+    # A pattern is fixed in detector coordinates, so one is needed per readout
+    # configuration, not per band. Group first, build within each group.
+    detectors = sorted({e.detector for e in index if e.detector is not None},
+                       key=lambda d: d.token)
+    if not detectors:
+        print("no readable frames", file=sys.stderr)
+        return 1
+    if len(detectors) > 1:
+        print(f"{len(detectors)} detector configurations found:")
+        for det in detectors:
+            print(f"   {det.token:22} {det.label:24} "
+                  f"{sum(1 for e in index if e.detector == det):4} frames")
+        print()
+    if args.detectors:
+        wanted = {str(d).strip().lower() for d in args.detectors}
+        kept = [d for d in detectors if d.token in wanted]
+        if not kept:
+            print(f"none of {sorted(wanted)} matched; available: "
+                  f"{', '.join(d.token for d in detectors)}", file=sys.stderr)
+            return 1
+        detectors = kept
+
     built = 0
-    for band in bands:
-        entries = [e for e in index if e.band == band]
-        if not entries:
-            print(f"{band:>3}: no images")
-            continue
-        pattern = pat.build_pattern(
-            [e.path for e in entries], band,
-            block=int(cfg.get("image.pattern.block", 16)),
-            smooth_blocks=float(cfg.get("image.pattern.smooth_blocks", 6.0)),
-            min_frames=int(args.min_frames or cfg.get("image.pattern.min_frames", 8)),
-            max_frames=int(cfg.get("image.pattern.max_frames", 60)),
-        )
-        if pattern is None:
-            print(f"{band:>3}: not enough usable frames ({len(entries)} found)")
-            continue
-        objects = {e.object_name for e in entries if e.object_name}
-        if len(objects) < 2:
-            print(f"{band:>3}: warning -- all frames are of one field "
-                  f"({', '.join(objects) or 'unknown'}). Dithering alone should remove "
-                  f"the sources, but adding frames of other fields with --extra-dirs "
-                  f"makes a cleaner pattern.")
-        path = pat.save_pattern(pattern, calib_root)
-        pat.preview(pattern, path.with_suffix(".png"))
-        print(f"{band:>3}: {pattern.n_frames} frames -> {path.name}   "
-              f"illumination {100 * pattern.illumination_amplitude:5.2f}% pp, "
-              f"fringe {100 * pattern.fringe_amplitude:5.2f}% pp")
-        built += 1
+    for det in detectors:
+        if len(detectors) > 1:
+            print(f"-- {det.label}")
+        for band in bands:
+            entries = [e for e in index if e.band == band and e.detector == det]
+            if not entries:
+                print(f"{band:>3}: no images")
+                continue
+            pattern = pat.build_pattern(
+                [e.path for e in entries], band,
+                block=int(cfg.get("image.pattern.block", 16)),
+                smooth_blocks=float(cfg.get("image.pattern.smooth_blocks", 6.0)),
+                min_frames=int(args.min_frames or cfg.get("image.pattern.min_frames", 8)),
+                max_frames=int(cfg.get("image.pattern.max_frames", 60)),
+            )
+            if pattern is None:
+                print(f"{band:>3}: not enough usable frames ({len(entries)} found)")
+                continue
+            objects = {e.object_name for e in entries if e.object_name}
+            if len(objects) < 2:
+                print(f"{band:>3}: warning -- all frames are of one field "
+                      f"({', '.join(objects) or 'unknown'}). Dithering alone should remove "
+                      f"the sources, but adding frames of other fields with --extra-dirs "
+                      f"makes a cleaner pattern.")
+            path = pat.save_pattern(pattern, calib_root)
+            pat.preview(pattern, path.with_suffix(".png"))
+            print(f"{band:>3}: {pattern.n_frames} frames -> {path.name}   "
+                  f"illumination {100 * pattern.illumination_amplitude:5.2f}% pp, "
+                  f"fringe {100 * pattern.fringe_amplitude:5.2f}% pp")
+            built += 1
 
     if built:
         print(f"\npatterns written to {calib_root}")
@@ -689,7 +770,7 @@ def cmd_colorterms(args) -> int:
     cfg.set("calibration.color_term", "fit")
     instrument = cfg.get("instrument_config", {})
     paths = pipeline.find_images(cfg, args.target)
-    index = pipeline.index_images(paths, instrument)
+    index = pipeline.index_images(paths, instrument, cfg=cfg)
     if args.bands:
         index = [e for e in index if e.band in args.bands]
 
@@ -822,6 +903,10 @@ def main(argv=None) -> int:
                            help="additional directories of frames to include; other "
                                 "fields make a cleaner pattern")
     bp_parser.add_argument("--min-frames", type=int, default=None)
+    bp_parser.add_argument("--detectors", nargs="+", default=None, metavar="TOKEN",
+                           help="only build for these detector configurations "
+                                "(tokens as printed by 'tjophot list -v', e.g. "
+                                "meia2_2048x2048); default is all of them")
     bp_parser.set_defaults(func=cmd_build_pattern)
 
     ct_parser = sub.add_parser("colorterms", help="fit the instrument colour terms")
