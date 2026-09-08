@@ -168,3 +168,31 @@ def stamp_arcmin(cfg, image=None, detector: Optional[Detector] = None,
                         frame_arcmin(image, detector, pixel_scale),
                         fraction=0.75, lo=4.0, hi=12.0, default=9.0,
                         step=1.0, rounding="down")
+
+
+def catalog_radius_arcmin(cfg, key: str = "calibration.search_radius_arcmin",
+                          image=None, detector: Optional[Detector] = None,
+                          pixel_scale: Optional[float] = None,
+                          default: float = 9.0) -> float:
+    """Radius of sky to fetch a reference catalogue over, honouring ``auto``.
+
+    ``auto`` is the circle that just contains the frame, with 5 per cent margin
+    and rounded up to a whole arcmin. Every caller goes through here: the
+    download is cached under a key that includes the radius, so a run and the
+    ``fetch-catalog`` that pre-caches for it must agree to the digit or the
+    pre-fetch is silently wasted.
+    """
+    ny = nx = 2048
+    scale = 0.36
+    if image is not None:
+        try:
+            ny, nx = image.data.shape[:2]
+            scale = float(image.meta.pixel_scale)
+        except Exception:
+            pass
+    elif detector is not None and pixel_scale:
+        ny, nx = detector.ny, detector.nx
+        scale = float(pixel_scale)
+    return resolve_size(cfg.get(key, "auto"), field_radius_arcmin(nx, ny, scale),
+                        fraction=1.05, lo=3.0, hi=30.0, default=default,
+                        step=1.0, rounding="up")

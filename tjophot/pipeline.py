@@ -298,8 +298,9 @@ def load_astrometry_reference(cfg, coord: SkyCoord, cache_root: Path,
     providers = [cfg.get("astrometry.catalog", "gaia_astrometry")]
     providers += list(cfg.get("astrometry.fallback_catalogs", []) or [])
     radius = det_mod.resolve_size(cfg.get("astrometry.search_radius_arcmin", "auto"),
-                                  field_arcmin if field_arcmin else 10.0,
-                                  fraction=1.05, lo=3.0, hi=30.0, default=10.0)
+                                  field_arcmin if field_arcmin else 9.6,
+                                  fraction=1.05, lo=3.0, hi=30.0, default=10.0,
+                                  step=1.0, rounding="up")
     local_path = cfg.resolve_path(cfg.get("calibration.local_catalog"))
 
     for provider in providers:

@@ -183,11 +183,7 @@ def _calibrate_once(image, sources: Table, fwhm_px: float, cfg, cache_root: Path
     """One pass at the zero point with the cuts exactly as given."""
     band = image.meta.band
     providers = list(cfg.get("calibration.catalogs", ["gaia_synth"]))
-    radius = detector.resolve_size(
-        cfg.get("calibration.search_radius_arcmin", "auto"),
-        detector.field_radius_arcmin(image.data.shape[1], image.data.shape[0],
-                                     image.meta.pixel_scale),
-        fraction=1.05, lo=3.0, hi=30.0, default=9.0)
+    radius = detector.catalog_radius_arcmin(cfg, image=image)
     match_radius = float(cfg.get("calibration.match_radius_arcsec", 1.5))
     min_snr = float(cfg.get("calibration.min_snr", 20.0))
     min_stars = int(cfg.get("calibration.min_stars", 5))

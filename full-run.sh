@@ -37,20 +37,36 @@ done
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 run() { printf '   $ %s\n' "$*"; "$@"; }
 
+# A step that exits 2 hit a bug rather than a missing input, so stop: carrying
+# on would bury the traceback under a benign-sounding message and then produce
+# a light curve built on whatever the broken step left behind.
+soft() {
+    local what="$1"; shift
+    printf '   $ %s\n' "$*"
+    "$@" && return 0
+    local code=$?
+    if [ "$code" -eq 2 ]; then
+        printf '\n   %s failed with an internal error (above). Stopping.\n' "$1" >&2
+        exit 2
+    fi
+    printf '   (%s)\n' "$what"
+    return 0
+}
+
 say "1/5  removing previous outputs for $TARGET"
 run tjophot clean "$TARGET" "${COMMON[@]+"${COMMON[@]}"}"
 
 say "2/5  resolving the position"
-run tjophot resolve "$TARGET" --write "${COMMON[@]+"${COMMON[@]}"}" \
-    || echo "   (not resolved; keeping whatever the target file has)"
+soft "not resolved; keeping whatever the target file has" \
+    tjophot resolve "$TARGET" --write "${COMMON[@]+"${COMMON[@]}"}"
 
 say "3/5  reference catalogues"
-run tjophot fetch-catalog "$TARGET" "${COMMON[@]+"${COMMON[@]}"}" \
-    || echo "   (no catalogue reached; the run will report no_zeropoint)"
+soft "no catalogue reached; the run will report no_zeropoint" \
+    tjophot fetch-catalog "$TARGET" "${COMMON[@]+"${COMMON[@]}"}"
 
 say "4/5  reference images for difference imaging"
-run tjophot fetch-template "$TARGET" "${COMMON[@]+"${COMMON[@]}"}" \
-    || echo "   (no template reached; the run falls back to direct photometry)"
+soft "no template reached; the run falls back to direct photometry" \
+    tjophot fetch-template "$TARGET" "${COMMON[@]+"${COMMON[@]}"}"
 
 say "5/5  photometry"
 run tjophot run "$TARGET" "${COMMON[@]+"${COMMON[@]}"}" "${RUNONLY[@]+"${RUNONLY[@]}"}"

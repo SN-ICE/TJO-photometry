@@ -359,7 +359,8 @@ def cmd_fetch_catalog(args) -> int:
     paths = find_images(cfg, args.target)
     index = index_images(paths, cfg.get("instrument_config", {}), cfg=cfg)
     coord, _ = resolve_target_coord(cfg, index, cfg.get("instrument_config", {}))
-    radius = float(args.radius or cfg.get("calibration.search_radius_arcmin", 9.0))
+    radius = _catalog_radius(cfg, index, args.radius)
+    print(f"catalogue radius: {radius:.0f}'")
 
     providers = args.catalogs or cfg.get("calibration.catalogs", ["gaia_synth"])
     ok = 0
@@ -563,6 +564,28 @@ def _compass(ax, shape, colour: str = "#4e9a06"):
                 arrowprops=dict(arrowstyle="->", color=colour, lw=1.3))
     ax.text(x0, y0 + arm * 1.25, "N", color=colour, ha="center", va="bottom", fontsize=9)
     ax.text(x0 - arm * 1.3, y0, "E", color=colour, ha="right", va="center", fontsize=9)
+
+
+def _widest(cfg, index):
+    """The widest detector in an index, and its pixel scale."""
+    from . import detector as det_mod
+    dets = [e.detector for e in index if e.detector is not None]
+    if not dets:
+        return None, None
+    widest = max(dets, key=lambda d: max(d.nx, d.ny))
+    inst = cfg.instrument_for({"INSTRUME": widest.instrument}) \
+        if hasattr(cfg, "instrument_for") else {}
+    scale = float((inst.get("defaults", {}) or {}).get("pixel_scale", 0.4)) * widest.binning
+    return widest, scale
+
+
+def _catalog_radius(cfg, index, override=None) -> float:
+    """The radius a run will use, so the pre-fetch caches under the same key."""
+    from . import detector as det_mod
+    if override:
+        return float(override)
+    widest, scale = _widest(cfg, index)
+    return det_mod.catalog_radius_arcmin(cfg, detector=widest, pixel_scale=scale)
 
 
 def _stamp_for(cfg, index, band: str) -> float:
@@ -921,6 +944,20 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
+    except (RuntimeError, FileNotFoundError, KeyError) as exc:
+        # Expected: the data or the configuration is not what was asked for.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except Exception:
+        # Exit 2 means the tool itself broke, as distinct from exit 1, which
+        # means it ran but the data or configuration was not there. full-run.sh
+        # treats them differently: a bug should stop the run, not be reported
+        # as "no catalogue reached".
+        import traceback
+        traceback.print_exc()
+        print("\nThis is a bug in tjophot, not a problem with the data.",
+              file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
