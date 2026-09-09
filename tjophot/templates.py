@@ -600,5 +600,11 @@ def get_reference(image, cfg, cache_root: Path, coord: SkyCoord,
         except Exception as exc:
             log.warning("reference source %s failed for %s: %s", source, band, exc)
 
-    log.warning("no reference image available for band %s", band)
+    log.warning(
+        "no reference image available for band %s -- those epochs get direct "
+        "photometry, with the host still in the aperture. Tried: %s. To give it "
+        "one: point subtraction.reference_files.%s at your own template, or add "
+        "a subtraction.hips.%s survey, or (for a filter no survey has) set "
+        "subtraction.tjo_stack.mjd_min once the supernova has faded.",
+        band, ", ".join(order), band, band)
     return None

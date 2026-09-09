@@ -22,10 +22,13 @@ subtraction:
   reference_sources:
     B: [file, hips, panstarrs, tjo_stack]
     V: [file, hips, panstarrs, tjo_stack]
+    R: [file, panstarrs, hips, tjo_stack]
+    I: [file, panstarrs, hips, tjo_stack]
     g: [file, panstarrs, tjo_stack]
     r: [file, panstarrs, tjo_stack]
     i: [file, panstarrs, tjo_stack]
     z: [file, panstarrs, tjo_stack]
+    default: [file, tjo_stack]
 
   # B and V have no Pan-STARRS counterpart. DSS2 is the closest wide-field
   # match but it is photographic, so check it against the cross-band fallback
@@ -34,12 +37,16 @@ subtraction:
   hips:
     B: {survey: dss2-blue}
     V: {survey: dss2-red}
+    R: {survey: dss2-red}
+    I: {survey: dss2-nir}
 
   # Fallback if the HiPS cutout loses: borrow the nearest PS1 filter instead.
   # Those epochs come out flagged 'cross_band_template'.
   reference_band:
     B: g
     V: r
+    R: r
+    I: i
 
   # Your own templates win over everything -- 'file' is first in every list.
   # reference_files:

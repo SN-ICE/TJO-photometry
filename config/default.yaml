@@ -190,10 +190,17 @@ subtraction:
   reference_sources:
     B: [file, hips, tjo_stack]
     V: [file, hips, tjo_stack]
+    R: [file, panstarrs, hips, tjo_stack]
+    I: [file, panstarrs, hips, tjo_stack]
     g: [file, panstarrs, hips, tjo_stack]
     r: [file, panstarrs, hips, tjo_stack]
     i: [file, panstarrs, hips, tjo_stack]
     z: [file, panstarrs, hips, tjo_stack]
+    # Johnson R and I are separate keys from SDSS r and i: YAML is case
+    # sensitive and they are different filters. 'default' catches any band not
+    # listed -- a narrow band such as H alpha, say -- so an unlisted filter
+    # falls back to your own frames instead of quietly finding nothing.
+    default: [file, tjo_stack]
 
   # Which public survey to render for each band, through the CDS hips2fits
   # service. Give a HiPS id ("CDS/P/DSS2/blue") or one of the shorthands in
@@ -211,6 +218,8 @@ subtraction:
   hips:
     B: {survey: dss2-blue}
     V: {survey: dss2-red}
+    R: {survey: dss2-red}
+    I: {survey: dss2-nir}
   hips_max_pixels: 4000
   panstarrs:
     size_arcmin: null          # cutout to request; default is 1.25 x cutout_arcmin
@@ -222,7 +231,14 @@ subtraction:
   # but a colour gradient across the host leaves structured residuals, so this is
   # a judgement call about your host, not a free lunch. Epochs measured this way
   # are flagged 'cross_band_template'.
-  reference_band: {}          # e.g. {B: g, V: r} to borrow another filter's template
+  # Borrow another filter's survey template. Pan-STARRS has only grizy, so
+  # Johnson R and I need one: R and PS1 r are a close bandpass match, and
+  # Johnson I sits between PS1 i and z. Those epochs come out flagged
+  # cross_band_template. Whether the borrowed PS1 stack beats the
+  # photographic DSS2 plate in the nominally right filter is a question
+  # about your field, not an argument to have:
+  #   tjophot fetch-template <name> --compare --bands I
+  reference_band: {R: r, I: i}
   convolve_science_ratio: 1.25 # convolve the science frame only when the reference
                                # seeing is this much worse; a survey stack is
                                # normally sharper than TJO, so this rarely fires
