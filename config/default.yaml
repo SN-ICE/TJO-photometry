@@ -68,7 +68,14 @@ image:
   # null means 'whatever this frame's instrument file says' -- MEIA2 and MEIA3
   # have different full wells. Set a number here to override both.
   saturation_adu: null
-  edge_margin_px: 24           # ignore this border when detecting/calibrating
+  # Ignore this border when detecting and calibrating. In arcsec so it means
+  # the same patch of sky at any binning; edge_margin_px still works if set.
+  edge_margin_arcsec: 9.0
+  # Mask pixels this many robust sigma BELOW the sky. Saturation bounds the
+  # frame from above only, and a bad column divided by a near-zero flat can
+  # reach -7e6 ADU (MEIA3 does): those would otherwise land in an aperture.
+  # Far enough out that real sky is never touched; 0 disables.
+  outlier_sigma: 30.0
   bad_value_mask: [0.0]        # pixel values treated as bad
   pattern:
     # Fixed detector patterns measured with 'tjophot build-pattern'. Applied
@@ -84,7 +91,11 @@ image:
     max_fringe_fraction: 0.5   # refuse to remove more than this fraction of sky
     min_flatness_gain: 1.05    # skip the fringe term unless it flattens the frame
   background:
-    box_size: 128              # px, Background2D mesh
+    # Background2D mesh, in arcsec (box_size in px still works if set). A fixed
+    # pixel box gives 32x32 meshes on a 4096 frame but 8x8 on a 1024 binned
+    # one, where the background stops being local at all.
+    box_arcsec: 46.0
+    min_cells: 12              # never fewer than this many meshes per axis
     filter_size: 5
     sigma_clip: 3.0
 

@@ -177,13 +177,33 @@ class ScienceImage:
 
     # ------------------------------------------------------------------ prep
     def build_mask(self, cfg) -> np.ndarray:
-        """Mask non-finite, saturated, dead and edge pixels."""
+        """Mask non-finite, saturated, dead, wildly negative and edge pixels."""
         mask = ~np.isfinite(self.data)
         mask |= self.data >= self.meta.saturation
         for bad in cfg.get("image.bad_value_mask", []) or []:
             mask |= self.data == float(bad)
 
-        margin = int(cfg.get("image.edge_margin_px", 0) or 0)
+        # Saturation only bounds the frame from above. Dividing by a flat that
+        # is near zero on a bad column sends pixels to large values of *either*
+        # sign, and MEIA3 frames carry columns that reach -7e6 ADU. Those pass
+        # every test above and then land in an aperture. Cut symmetrically, far
+        # enough out that no real sky pixel is ever touched.
+        low_sigma = float(cfg.get("image.outlier_sigma", 0) or 0)
+        if low_sigma > 0:
+            from astropy.stats import sigma_clipped_stats
+            finite = np.isfinite(self.data)
+            if finite.any():
+                _, med, std = sigma_clipped_stats(self.data[finite], sigma=3.0)
+                if np.isfinite(med) and np.isfinite(std) and std > 0:
+                    floor = med - low_sigma * std
+                    wild = self.data < floor
+                    if wild.any():
+                        from scipy.ndimage import binary_dilation
+                        mask |= binary_dilation(wild, iterations=1)
+                        self.qa["outlier_pixels"] = int(wild.sum())
+                        self.qa["outlier_floor_adu"] = float(floor)
+
+        margin = self._edge_margin(cfg)
         if margin > 0:
             edge = np.zeros_like(mask)
             edge[:margin, :] = True
@@ -202,11 +222,45 @@ class ScienceImage:
         self.qa["masked_fraction"] = float(mask.mean())
         return mask
 
+    def _edge_margin(self, cfg) -> int:
+        """Edge margin in pixels. Configured in arcsec so it means the same
+        patch of sky whatever the binning: 24 px is 9 arcsec unbinned but 17
+        binned 2x2, and on a 1024 frame that fixed margin eats 9 per cent of
+        the field instead of 2."""
+        arcsec = cfg.get("image.edge_margin_arcsec")
+        if arcsec:
+            scale = float(self.meta.pixel_scale) or 1.0
+            return max(int(round(float(arcsec) / scale)), 0)
+        return int(cfg.get("image.edge_margin_px", 0) or 0)
+
+    def _background_box(self, cfg) -> int:
+        """Background mesh size in pixels.
+
+        Configured in arcsec, for two reasons: the sky structure being
+        modelled has an angular scale, and a fixed pixel box gives wildly
+        different mesh counts across TJO's readouts -- 128 px is 32x32 meshes
+        on a 4096 frame but only 8x8 on a 1024 binned one, where a filter_size
+        of 5 then spans most of the field and the 'local' background is
+        effectively global. The box is also kept small enough to leave at least
+        `min_cells` meshes per axis.
+        """
+        arcsec = cfg.get("image.background.box_arcsec")
+        if arcsec:
+            scale = float(self.meta.pixel_scale) or 1.0
+            box = int(round(float(arcsec) / scale))
+        else:
+            box = int(cfg.get("image.background.box_size", 128))
+        min_cells = int(cfg.get("image.background.min_cells", 12) or 0)
+        if min_cells > 0:
+            box = min(box, max(min(self.data.shape) // min_cells, 16))
+        return max(box, 16)
+
     def estimate_background(self, cfg) -> None:
         """2D background and its RMS via photutils.Background2D."""
-        box = int(cfg.get("image.background.box_size", 128))
+        box = self._background_box(cfg)
         filt = int(cfg.get("image.background.filter_size", 5))
         nsig = float(cfg.get("image.background.sigma_clip", 3.0))
+        self.qa["background_box_px"] = box
         try:
             bkg = Background2D(
                 self.data,
