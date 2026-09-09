@@ -83,7 +83,7 @@ def index_images(paths: Iterable[Path], instrument: dict,
             continue
         index.append(EpochIndex(Path(path), float(mjd), band, name,
                                 float(first_header_value(header, hmap.get("exptime", ["EXPTIME"]), 1.0)),
-                                identify(header)))
+                                identify(header, instrument=this)))
     return sorted(index, key=lambda e: (e.band, e.mjd))
 
 

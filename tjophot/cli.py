@@ -752,22 +752,36 @@ def cmd_build_pattern(args) -> int:
             if not entries:
                 print(f"{band:>3}: no images")
                 continue
+            max_frames = int(cfg.get("image.pattern.max_frames", 60))
+            chosen = pat.balance_fields(entries, max_frames)
+            # A pattern built from one field absorbs that field's own sky and
+            # then subtracts it back out of every frame of that field, which
+            # looks like an improvement and is not one. Refuse rather than ship
+            # it; --allow-single-field is there for when you have measured that
+            # the field is empty enough.
+            fields = {e.object_name for e in chosen if e.object_name}
+            min_fields = int(cfg.get("image.pattern.min_fields", 2) or 0)
+            if not args.allow_single_field and 0 < len(fields) < min_fields:
+                print(f"{band:>3}: only {len(fields)} field "
+                      f"({', '.join(sorted(fields))}) -- need {min_fields}. "
+                      f"Add frames of other fields with --extra-dirs, or pass "
+                      f"--allow-single-field if you know this field is empty enough.")
+                continue
             pattern = pat.build_pattern(
-                [e.path for e in entries], band,
+                [e.path for e in chosen], band,
                 block=int(cfg.get("image.pattern.block", 16)),
                 smooth_blocks=float(cfg.get("image.pattern.smooth_blocks", 6.0)),
                 min_frames=int(args.min_frames or cfg.get("image.pattern.min_frames", 8)),
-                max_frames=int(cfg.get("image.pattern.max_frames", 60)),
+                max_frames=max_frames,
+                outlier_sigma=float(cfg.get("image.outlier_sigma", 30.0) or 0),
+                max_amplitude=float(cfg.get("image.pattern.max_amplitude", 0.25)),
+                instrument=cfg.instrument_for({"INSTRUME": det.instrument})
+                if hasattr(cfg, "instrument_for") else instrument,
             )
             if pattern is None:
                 print(f"{band:>3}: not enough usable frames ({len(entries)} found)")
                 continue
-            objects = {e.object_name for e in entries if e.object_name}
-            if len(objects) < 2:
-                print(f"{band:>3}: warning -- all frames are of one field "
-                      f"({', '.join(objects) or 'unknown'}). Dithering alone should remove "
-                      f"the sources, but adding frames of other fields with --extra-dirs "
-                      f"makes a cleaner pattern.")
+            objects = {e.object_name for e in chosen if e.object_name}
             path = pat.save_pattern(pattern, calib_root)
             pat.preview(pattern, path.with_suffix(".png"))
             print(f"{band:>3}: {pattern.n_frames} frames -> {path.name}   "
@@ -926,6 +940,9 @@ def main(argv=None) -> int:
                            help="additional directories of frames to include; other "
                                 "fields make a cleaner pattern")
     bp_parser.add_argument("--min-frames", type=int, default=None)
+    bp_parser.add_argument("--allow-single-field", action="store_true",
+                           help="build even when only one field is available; the "
+                                "pattern will contain that field's own sky structure")
     bp_parser.add_argument("--detectors", nargs="+", default=None, metavar="TOKEN",
                            help="only build for these detector configurations "
                                 "(tokens as printed by 'tjophot list -v', e.g. "

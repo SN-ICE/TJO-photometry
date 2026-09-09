@@ -42,6 +42,17 @@ defaults:
   # the camera's real full-well figure, put it here instead -- this one is
   # inferred from the data.
   saturation_adu: 50000
+  # Border to remove from a full-chip (4096 x 4108) frame. The outer ~500 px
+  # run 10 to 60 per cent off the sky level while the centre is flat to under
+  # 1 per cent, so this is a real artefact, not a cosmetic crop. The numbers
+  # reproduce the 3108 x 3096 product of the existing cut_tjo.py, so frames
+  # trimmed there and frames trimmed here share one detector and one pattern.
+  # CRPIX is moved with the crop; a frame that is already trimmed (its size no
+  # longer matches IMAGEW/IMAGEH) is left alone.
+  # [pixels removed from the low edge, from the high edge]
+  trim:
+    x: [494, 494]
+    y: [506, 506]
 
 filters:
   "B": B

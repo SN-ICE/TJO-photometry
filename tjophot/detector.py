@@ -73,7 +73,63 @@ def _int(value, default: int = 0) -> int:
         return default
 
 
-def identify(header, instrument_map: Optional[dict] = None) -> Detector:
+def trim_spec(instrument: Optional[dict]) -> Optional[dict]:
+    """The ``trim`` block of an instrument definition, if it has one."""
+    if not instrument:
+        return None
+    spec = (instrument.get("defaults", {}) or {}).get("trim") or instrument.get("trim")
+    return spec or None
+
+
+def trim_slices(header, instrument: Optional[dict]):
+    """(y_slice, x_slice) to apply to this frame, or None if it needs no trim.
+
+    A frame is trimmed only when it is still the full chip -- astrometry.net
+    records the size it solved in IMAGEW/IMAGEH, so an already-trimmed frame is
+    recognisable and left alone. That lets one archive hold both.
+    """
+    spec = trim_spec(instrument)
+    if not spec:
+        return None
+    ny, nx = _int(header.get("NAXIS2")), _int(header.get("NAXIS1"))
+    full_x, full_y = _int(header.get("IMAGEW"), nx), _int(header.get("IMAGEH"), ny)
+    if (nx, ny) != (full_x, full_y):
+        return None                      # already trimmed by something else
+    x0, x1 = (int(v) for v in spec.get("x", (0, 0)))
+    y0, y1 = (int(v) for v in spec.get("y", (0, 0)))
+    if x0 + x1 >= nx or y0 + y1 >= ny or (x0 or x1 or y0 or y1) == 0:
+        return None
+    return slice(y0, ny - y1), slice(x0, nx - x1)
+
+
+def apply_trim(data, header, instrument: Optional[dict]):
+    """Cut the unusable border off a frame, keeping the WCS valid.
+
+    MEIA3 frames carry a real edge artefact: the outer ~500 px run 10 to 60 per
+    cent off the sky level while the centre is flat to under 1 per cent. MEIA2
+    has no such border -- measured flat to 1 per cent out to the corners -- so
+    the trim belongs to the instrument, not to the pipeline.
+
+    CRPIX moves with the crop. The SIP coefficients are polynomials in
+    (x - CRPIX), so they stay valid without being touched.
+    """
+    cut = trim_slices(header, instrument)
+    if cut is None:
+        return data, header, None
+    ys, xs = cut
+    header = header.copy()
+    for key, shift in (("CRPIX1", xs.start), ("CRPIX2", ys.start)):
+        if key in header:
+            header[key] = float(header[key]) - shift
+    data = data[ys, xs]
+    header["NAXIS1"], header["NAXIS2"] = data.shape[1], data.shape[0]
+    header["TJOTRIM"] = (f"x{xs.start}:{xs.stop} y{ys.start}:{ys.stop}",
+                         "border removed by tjophot")
+    return data, header, (ys, xs)
+
+
+def identify(header, instrument_map: Optional[dict] = None,
+             instrument: Optional[dict] = None) -> Detector:
     """The detector configuration a FITS header describes.
 
     ``instrument_map`` optionally renames the raw INSTRUME value, for archives
@@ -85,6 +141,12 @@ def identify(header, instrument_map: Optional[dict] = None) -> Detector:
     ny = _int(header.get("NAXIS2"), 0)
     nx = _int(header.get("NAXIS1"), 0)
     binning = _int(header.get("XFACTOR"), 1) or 1
+    # Report the geometry the pipeline will actually work on, so that indexing
+    # and image loading agree on which detector a frame belongs to.
+    cut = trim_slices(header, instrument)
+    if cut is not None:
+        ys, xs = cut
+        ny, nx = ys.stop - ys.start, xs.stop - xs.start
     return Detector(instrument=raw or "unknown", ny=ny, nx=nx, binning=binning)
 
 

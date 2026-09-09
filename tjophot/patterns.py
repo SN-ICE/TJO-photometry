@@ -31,7 +31,7 @@ import numpy as np
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
 
-from .detector import Detector, identify
+from .detector import Detector, apply_trim, identify
 from .utils import band_token, ensure_dir, get_logger
 
 log = get_logger("tjophot.patterns")
@@ -112,14 +112,45 @@ def _block_median(data: np.ndarray, block: int) -> np.ndarray:
         return np.nanmedian(cube, axis=(1, 3))
 
 
+def balance_fields(entries, max_frames: int) -> list:
+    """Pick up to *max_frames* frames, spread evenly over the fields available.
+
+    ``entries`` are objects with ``.path`` and ``.object_name``. Taking the
+    first N in time instead lets one target fill every slot -- a 2023 campaign
+    of 393 frames leaves no room for anything later -- and a pattern measured
+    on one field quietly absorbs that field's own sky, then subtracts it back
+    out of every frame of that field. Round-robin keeps every field
+    represented whatever their relative sizes.
+    """
+    groups: dict = {}
+    for entry in entries:
+        groups.setdefault(getattr(entry, "object_name", "") or "?", []).append(entry)
+    order = sorted(groups)
+    picked, i = [], 0
+    while len(picked) < max_frames:
+        added = False
+        for name in order:
+            if i < len(groups[name]):
+                picked.append(groups[name][i])
+                added = True
+                if len(picked) >= max_frames:
+                    break
+        if not added:
+            break
+        i += 1
+    return picked
+
+
 def build_pattern(paths: Sequence[Path], band: str, block: int = 16,
                   smooth_blocks: float = 24.0, min_frames: int = 8,
-                  max_frames: int = 60) -> Optional[Pattern]:
+                  max_frames: int = 60, outlier_sigma: float = 30.0,
+                  max_amplitude: float = 0.25,
+                  instrument: Optional[dict] = None) -> Optional[Pattern]:
     """Median-combine source-masked, sky-normalised frames in detector space.
 
     Frames should be dithered (TJO dithers by about 50 px, which is plenty) and
-    ideally drawn from more than one field, so that no astronomical source
-    survives the median.
+    drawn from more than one field, so that no astronomical source survives the
+    median. Use :func:`balance_fields` to choose them.
     """
     paths = list(paths)[:max_frames]
     if len(paths) < min_frames:
@@ -134,7 +165,8 @@ def build_pattern(paths: Sequence[Path], band: str, block: int = 16,
                 hdu = next((h for h in hdul if getattr(h, "data", None) is not None), hdul[0])
                 data = np.asarray(hdu.data, dtype=float)
                 head = hdu.header
-            here = identify(head)
+            data, head, _ = apply_trim(data, head, instrument)
+            here = identify(head, instrument=instrument)
             if detector is None:
                 detector = here
                 binning = int(head.get("XFACTOR", 1) or 1)
@@ -152,9 +184,17 @@ def build_pattern(paths: Sequence[Path], band: str, block: int = 16,
             shape = data.shape
 
         mask = _source_mask(data)
-        _, sky, _ = sigma_clipped_stats(data, mask=mask, sigma=3.0)
+        _, sky, noise = sigma_clipped_stats(data, mask=mask, sigma=3.0)
         if not np.isfinite(sky) or sky <= 0:
             continue
+        # Bad columns divided by a near-zero flat reach +-1e7 ADU on MEIA3.
+        # A block median mostly survives them, but the source mask and the
+        # block statistics do not, and a single such block turns the pattern
+        # into nonsense. Drop anything far outside the sky distribution.
+        if np.isfinite(noise) and noise > 0:
+            wild = np.abs(data - sky) > outlier_sigma * noise
+            if wild.any():
+                mask = mask | wild
         normalised = np.where(mask, np.nan, data) / sky
         planes.append(_block_median(normalised, block).astype(np.float32))
         used.append(Path(path))
@@ -199,6 +239,18 @@ def build_pattern(paths: Sequence[Path], band: str, block: int = 16,
 
     log.info("%s pattern from %d frames: illumination %.3f%% pp, fringe %.3f%% pp",
              band, len(planes), 100 * header["ILLUMPP"], 100 * header["FRNGPP"])
+
+    # A detector pattern is a few per cent. Anything larger is not the
+    # detector: it is an unmasked defect, or one bright field that the median
+    # failed to remove. Refuse it rather than write something that will be
+    # subtracted from every frame.
+    worst = max(float(header["ILLUMPP"]), float(header["FRNGPP"]))
+    if max_amplitude and worst > max_amplitude:
+        log.error("%s pattern rejected: %.1f%% peak-to-peak is far too large for a "
+                  "detector pattern. Usually one bright field dominating the median "
+                  "(add frames of other fields) or unmasked bad pixels.",
+                  band, 100 * worst)
+        return None
 
     return Pattern(illumination=illumination, fringe=fringe, block=block, band=band,
                    shape=shape, n_frames=len(planes), header=header, detector=detector)

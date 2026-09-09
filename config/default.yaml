@@ -86,6 +86,15 @@ image:
     smooth_blocks: 24.0        # illumination = pattern smoothed on this many blocks
                                # (24 x 16 px ~ 380 px, well above the ~100 px fringes)
     min_frames: 8
+    # Refuse a pattern larger than this peak-to-peak: a detector pattern is a
+    # few per cent, so more than this means one bright field dominated the
+    # median or bad pixels went unmasked, not that the detector is unusual.
+    # Refuse a pattern larger than this peak-to-peak. Every trustworthy pattern
+    # measured on this archive is at most 5.8% (z-band fringing, the largest
+    # real effect there is); anything above 8% has been a bright host galaxy
+    # surviving the median, not the detector.
+    max_amplitude: 0.08
+    min_fields: 2              # refuse a pattern measured on a single field
     max_frames: 60
     fit_fringe_scale: true     # fit the fringe amplitude per frame
     max_fringe_fraction: 0.5   # refuse to remove more than this fraction of sky

@@ -95,6 +95,11 @@ class ScienceImage:
         if callable(chooser):
             instrument = chooser(header) or instrument
 
+        # Cut the unusable border, if this camera has one, before the WCS is
+        # read: apply_trim moves CRPIX with the crop.
+        from .detector import apply_trim
+        data, header, trimmed = apply_trim(data, header, instrument)
+
         hmap = instrument.get("header", {})
         defaults = instrument.get("defaults", {})
 
@@ -148,6 +153,8 @@ class ScienceImage:
         )
 
         image = cls(data, header, meta, wcs)
+        if trimmed is not None:
+            image.qa["trimmed"] = True
 
         if pattern is not None:
             from . import patterns as pattern_module
