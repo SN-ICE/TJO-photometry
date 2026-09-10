@@ -79,16 +79,14 @@ def _suspect(row: dict) -> bool:
         flags = int(row.get("flags", 0) or 0)
     except (TypeError, ValueError):
         return False
-    if flags & (FLAG_BAD_SUBTRACTION | FLAG_SATURATED | FLAG_IN_TEMPLATE):
-        return True
-    # A difference the quality test doubted is suspect too. Preferring the
-    # difference is right in general -- it removes the host, which direct
-    # photometry cannot -- but not when the difference is visibly corrupted:
-    # a dipole residual is a measurement of the wrong thing, while the host in
-    # the aperture is at least a smooth, understood bias.
-    if flags & FLAG_DIPOLE_RESIDUAL and str(row.get("method", "")).startswith("difference"):
-        return True
-    return False
+    # A dipole 'downgrade' is deliberately NOT suspect here. Demoting on it was
+    # tried and measured: on SN2022xkq it changed nothing at all (the gain there
+    # came from the kernel-sum check), and on SN2023ixf it moved 46 epochs off
+    # their difference image with no improvement in either scatter or agreement
+    # with an independent reduction -- while giving up host subtraction on M101,
+    # which is a real cost the metrics cannot see. The flag stays as an
+    # annotation; only a 'fail', which also sets FLAG_BAD_SUBTRACTION, demotes.
+    return bool(flags & (FLAG_BAD_SUBTRACTION | FLAG_SATURATED | FLAG_IN_TEMPLATE))
 
 
 def choose_primary(rows: Sequence[dict], preference: str = "auto") -> Optional[dict]:
@@ -98,11 +96,6 @@ def choose_primary(rows: Sequence[dict], preference: str = "auto") -> Optional[d
     direct aperture -- but a measurement carrying a hard quality flag (a failed
     subtraction, a saturated aperture, a difference leaving dipole residuals) is
     only used if nothing cleaner exists.
-
-    On SN2022xkq, where the B and V templates are photographic plates and I
-    borrows another filter, this is what separates the two: adopting the
-    doubted differences gives V a scatter of 0.189 mag about a smooth curve and
-    a 0.117 mag spread against AutoPhOT; declining them gives 0.134 and 0.058.
     """
     usable = [r for r in rows if np.isfinite(r.get("mag", np.nan)) or r.get("is_limit")]
     if not usable:
