@@ -508,8 +508,14 @@ def _difference_rows(diff, image, cfg, coord, common, zp, limit,
     sn_xy = (float(x), float(y))
 
     max_chi2 = float(cfg.get("subtraction.max_chi2", 2.5))
-    bad_subtraction = lc.FLAG_BAD_SUBTRACTION if (
-        np.isfinite(diff.chi2) and diff.chi2 > max_chi2) else 0
+    # A missing chi2 is not a passing chi2. The kernel solve produces one only
+    # when it converged on enough stamps, so NaN means the PSF match could not
+    # be assessed at all -- exactly the case most likely to be wrong. Reading it
+    # as "fine" let three SN2022xkq epochs through with 0.7 to 1.1 mag errors
+    # and no flag.
+    bad_subtraction = (lc.FLAG_BAD_SUBTRACTION
+                       if (not np.isfinite(diff.chi2) or diff.chi2 > max_chi2)
+                       else 0)
     ref_band = diff.meta.get("reference_band")
     if ref_band and ref_band != image.meta.band:
         bad_subtraction |= lc.FLAG_CROSS_BAND_TEMPLATE
