@@ -23,6 +23,7 @@ COLUMNS = [
     "astrom_rms_arcsec", "astrom_nstars", "detector", "pattern_applied", "fringe_scale_adu",
     "diff_verdict", "diff_dipole_fraction", "diff_quality_nsources",
     "diff_residual_sigma", "diff_target_dipole",
+    "inject_limit_mag", "inject_limit_err", "inject_sites", "error_scale",
     "ref_source", "ref_band", "ref_nimages", "diff_mode", "diff_chi2", "diff_kernel_sum", "diff_nstamps",
     "x", "y", "dx", "dy", "flags", "quality", "image",
 ]

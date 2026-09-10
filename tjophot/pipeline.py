@@ -417,6 +417,7 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
 
     limit = ph.empirical_limit(image, fwhm, zp.zp, cfg, apcor.apcor_mag) if zp.ok else np.nan
 
+
     cal_flags = 0
     if reference is not None:
         lo, hi = reference.mjd_range
@@ -450,6 +451,29 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
                                 flags=int(tab["flags"][0]), limit=limit))
 
     epsf, n_psf = ph.build_epsf(image, psf_stars, fwhm, cfg)
+
+    # Injection measures the depth of this frame as this code actually measures
+    # it, on the background the transient really sits on. Where it disagrees
+    # with the blank-aperture estimate, it is the one to believe.
+    if zp.ok and bool(cfg.get("calibration.injection.enabled", True)):
+        from . import injection
+        try:
+            sx, sy = image.wcs.world_to_pixel(coord)
+            inj = injection.measure_limit(image, epsf, fwhm, zp.zp, cfg,
+                                          (float(sx), float(sy)),
+                                          apcor_mag=apcor.apcor_mag)
+            common.update(inj.as_dict())
+            if np.isfinite(inj.limit_mag):
+                log.info("%s: injected limit %.2f (blank-aperture %.2f)%s",
+                         image.meta.path.name, inj.limit_mag, limit,
+                         f", errors x{inj.error_scale:.2f}"
+                         if np.isfinite(inj.error_scale) else "")
+                limit = inj.limit_mag
+            elif inj.message:
+                log.debug("%s: no injected limit (%s)", image.meta.path.name, inj.message)
+        except Exception as exc:
+            log.warning("%s: injection limit failed (%s); keeping the blank-aperture "
+                        "estimate", image.meta.path.name, exc)
     psf_corr = 0.0
     if epsf is not None and bool(cfg.get("photometry.psf.enabled", True)):
         psf_corr = ph.psf_to_aperture_correction(image, epsf, psf_stars, fwhm, cfg,

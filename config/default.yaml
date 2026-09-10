@@ -170,6 +170,22 @@ calibration:
   # Drop catalogue stars that SIMBAD classifies as variable. With three to
   # seven usable stars on a sparse field, one Mira moves the zero point.
   screen_variables: true
+  # Limiting magnitude by injecting the frame's own PSF around the target and
+  # bisecting to the magnitude recovered half the time. Slower than the
+  # blank-aperture estimate but measures the depth on the host the transient
+  # actually sits on, which is where the analytic number is worst.
+  injection:
+    enabled: true
+    n_sites: 40
+    min_sites: 12
+    snr: 3.0                 # what counts as a recovery
+    completeness: 0.5        # the limit is the 50 per cent recovery point
+    min_radius_fwhm: 2.0     # annulus around the target: close enough to share
+    max_radius_fwhm: 6.0     # its background, far enough not to sit on it
+    step_mag: 0.5
+    max_steps: 14
+    bisect_steps: 6
+    min_for_error_scale: 20  # recoveries needed before judging the error bars
   variable_match_arcsec: 2.0
   min_stars: 5
   # If the strict cuts leave fewer than min_stars, the catalogue-error, SNR and
