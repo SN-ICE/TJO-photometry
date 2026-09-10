@@ -164,6 +164,7 @@ class ScienceImage:
                             path.name, pattern.band, why)
                 pattern = None
 
+        image.crmask = None
         if pattern is not None:
             from . import patterns as pattern_module
             try:
@@ -178,6 +179,19 @@ class ScienceImage:
                 image.qa["pattern_applied"] = False
         else:
             image.qa["pattern_applied"] = False
+
+        # Cosmic rays go after the detector pattern (which needs the real sky)
+        # and before the mask and background, both of which they would bias.
+        from . import cosmics
+        fwhm_guess = float(cfg.get("detection.fwhm_init_arcsec", 2.0)) / max(pixel_scale, 1e-3)
+        image.data, crmask, cr_info = cosmics.remove(
+            image.data, cfg, gain=meta.gain, readnoise=meta.readnoise,
+            saturation=meta.saturation, fwhm_px=fwhm_guess)
+        image.crmask = crmask
+        image.qa.update(cr_info)
+        if cr_info.get("cosmic_rays"):
+            log.debug("%s: %d cosmic ray pixels removed (%.3f%%)", path.name,
+                      cr_info["cosmic_rays"], 100 * cr_info["cosmic_ray_fraction"])
 
         image.build_mask(cfg)
         return image
@@ -209,6 +223,9 @@ class ScienceImage:
                         mask |= binary_dilation(wild, iterations=1)
                         self.qa["outlier_pixels"] = int(wild.sum())
                         self.qa["outlier_floor_adu"] = float(floor)
+
+        if getattr(self, "crmask", None) is not None and np.any(self.crmask):
+            mask |= np.asarray(self.crmask, bool)
 
         margin = self._edge_margin(cfg)
         if margin > 0:

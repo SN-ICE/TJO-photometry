@@ -71,6 +71,20 @@ image:
   # Ignore this border when detecting and calibrating. In arcsec so it means
   # the same patch of sky at any binning; edge_margin_px still works if set.
   edge_margin_arcsec: 9.0
+  # Cosmic rays: sharp few-pixel spikes no PSF could make. A 300 s MEIA3 frame
+  # carries a few thousand. Detected with L.A.Cosmic (astroscrappy), which
+  # separates them from stars by Laplacian edge sharpness, not brightness.
+  cosmic_rays:
+    enabled: true
+    sigclip: 4.5             # detection threshold in sigma
+    sigfrac: 0.3             # neighbouring-pixel threshold, as a fraction of sigclip
+    objlim: 10.0             # contrast against the fine-structure image; higher spares stars
+    iterations: 4
+    dilate: 1                # grow the mask by this many pixels
+    protect_nsigma: 5.0      # bright pixels shielded from flagging...
+    min_star_pixels: 4       # ...but only in groups this size, so spikes stay exposed
+    max_fraction: 0.02       # flagging more than this of a frame is a misfire; skip it
+    reject_within_fwhm: 1.0  # keep PSF stars this far from any flagged pixel
   # Mask pixels this many robust sigma BELOW the sky. Saturation bounds the
   # frame from above only, and a bad column divided by a near-zero flat can
   # reach -7e6 ADU (MEIA3 does): those would otherwise land in an aperture.

@@ -97,6 +97,17 @@ def select_psf_stars(image, sources: Table, cfg, fwhm_px: float,
         & (approx_snr > min_snr)
         & (neighbour_distance(sources) > isolation)
     )
+    crmask = getattr(image, "crmask", None)
+    if crmask is not None and np.any(crmask):
+        from . import cosmics
+        near = cosmics.contaminated(
+            crmask, x, y,
+            float(cfg.get("image.cosmic_rays.reject_within_fwhm", 1.0)) * fwhm_px)
+        if near.any():
+            log.debug("%s: %d PSF candidates dropped next to a cosmic ray",
+                      image.meta.path.name, int((near & keep).sum()))
+        keep &= ~near
+
     stars = sources[keep]
     if len(stars) == 0:
         log.warning("%s: no isolated PSF stars survived the cuts", image.meta.path.name)

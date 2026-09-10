@@ -8,3 +8,4 @@ matplotlib>=3.7
 pandas>=2.0
 PyYAML>=6.0
 requests>=2.28
+astroscrappy>=1.1     # cosmic ray rejection (L.A.Cosmic)
