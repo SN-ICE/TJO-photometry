@@ -418,3 +418,99 @@ def color_columns(table: Table, band: str) -> Optional[tuple[str, str]]:
         if cand[0] in table.colnames and cand[1] in table.colnames:
             return cand
     return None
+
+
+# --------------------------------------------------------------------------
+# known variable stars
+# --------------------------------------------------------------------------
+# SIMBAD object types that mean "this star does not keep the same brightness".
+# Screening on the catalogue's own classification rather than on a measured
+# amplitude is deliberate: with three to seven calibration stars on a sparse
+# field, one Mira moves the zero point outright, and there is no way to catch it
+# from a single epoch's data.
+VARIABLE_OTYPES = {
+    "V*", "V*?", "Pu*", "RR*", "Ce*", "cC*", "gD*", "SX*", "dS*", "RV*", "WV*",
+    "bC*", "Mi*", "sr*", "LP*", "Ir*", "Or*", "RS*", "BY*", "Er*", "Fl*", "FU*",
+    "RC*", "RC?", "Sy*", "CV*", "No*", "DN*", "AM*", "Ro*", "a2*", "Ae*", "be*",
+    "EB*", "Al*", "bL*", "WU*", "El*", "Ep*", "SN*", "LPV*", "Pu?", "RR?", "Ce?",
+}
+
+
+def _variable_cache(cache_root: Path, ra: float, dec: float, radius: float) -> Path:
+    return ensure_dir(Path(cache_root) / "catalogs") / (
+        f"variables_{_snap(ra):.4f}{_snap(dec):+.4f}_r{radius:.1f}.ecsv")
+
+
+def variable_stars(ra: float, dec: float, radius_arcmin: float, cache_root: Path,
+                   refresh: bool = False) -> Optional[Table]:
+    """Known variable stars in the field, from SIMBAD. Cached like a catalogue.
+
+    Returns a table with ``ra``/``dec``/``otype``, an empty table when SIMBAD
+    has nothing, or None when it could not be reached -- the caller must be able
+    to tell "no variables here" from "I do not know", and must not silently
+    calibrate on variables because a query failed.
+    """
+    path = _variable_cache(cache_root, ra, dec, radius_arcmin)
+    if path.exists() and not refresh:
+        try:
+            table = Table.read(path)
+            log.info("using cached variable-star list (%d entries)", len(table))
+            return table
+        except Exception as exc:
+            log.warning("could not read %s: %s", path.name, exc)
+
+    try:
+        from astroquery.simbad import Simbad
+        import astropy.units as u
+        from astropy.coordinates import SkyCoord
+
+        sim = Simbad()
+        sim.TIMEOUT = 60
+        sim.ROW_LIMIT = 2000
+        for field in ("otype", "otypes"):
+            try:
+                sim.add_votable_fields(field)
+                break
+            except Exception:
+                continue
+        raw = sim.query_region(SkyCoord(ra * u.deg, dec * u.deg),
+                               radius=float(radius_arcmin) * u.arcmin)
+    except Exception as exc:
+        log.warning("SIMBAD variable-star lookup failed (%s); calibration stars "
+                    "are not screened for variability on this field", exc)
+        return None
+    if raw is None or len(raw) == 0:
+        table = Table({"ra": [], "dec": [], "otype": []})
+        table.write(path, overwrite=True)
+        return table
+
+    cols = {c.lower(): c for c in raw.colnames}
+    ocol = cols.get("otype") or cols.get("otypes") or cols.get("main_type")
+    rcol = cols.get("ra") or cols.get("ra_d")
+    dcol = cols.get("dec") or cols.get("dec_d")
+    if ocol is None or rcol is None or dcol is None:
+        log.warning("SIMBAD returned columns %s, which do not include a type and a "
+                    "position; skipping the variability screen", raw.colnames)
+        return None
+
+    otype = np.array([str(v).strip() for v in raw[ocol]])
+    is_var = np.array([any(part.strip() in VARIABLE_OTYPES
+                           for part in str(v).replace("|", ",").split(","))
+                       for v in otype])
+    try:
+        import astropy.units as u
+        from astropy.coordinates import SkyCoord
+        coords = SkyCoord(raw[rcol], raw[dcol], unit=(u.deg, u.deg))
+    except Exception:
+        from astropy.coordinates import SkyCoord
+        coords = SkyCoord(raw[rcol], raw[dcol], unit=("hourangle", "deg"))
+
+    table = Table({"ra": coords.ra.deg[is_var], "dec": coords.dec.deg[is_var],
+                   "otype": otype[is_var]})
+    try:
+        table.write(path, overwrite=True)
+    except Exception as exc:
+        log.warning("could not cache the variable-star list: %s", exc)
+    log.info("SIMBAD: %d known variables among %d objects in the field",
+             len(table), len(raw))
+    return table

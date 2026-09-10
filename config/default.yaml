@@ -164,6 +164,13 @@ calibration:
   search_radius_arcmin: auto     # as above: sized to the frame being calibrated
   match_radius_arcsec: 1.5
   min_snr: 20.0
+  # A CCD stops being linear below saturation; a calibration star whose peak
+  # is above this fraction of full well is dropped. Never applied to the target.
+  nonlinear_frac: 0.85
+  # Drop catalogue stars that SIMBAD classifies as variable. With three to
+  # seven usable stars on a sparse field, one Mira moves the zero point.
+  screen_variables: true
+  variable_match_arcsec: 2.0
   min_stars: 5
   # If the strict cuts leave fewer than min_stars, the catalogue-error, SNR and
   # matching cuts are loosened in steps and retried; only if that still falls

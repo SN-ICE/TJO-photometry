@@ -178,6 +178,26 @@ def calibrate_image(image, sources: Table, fwhm_px: float, cfg, cache_root: Path
         float("nan"), "", image.meta.system, ok=False, message="no attempt succeeded")
 
 
+def _drop_variables(table: Table, cfg, ra: float, dec: float, radius: float,
+                    cache_root: Path, refresh: bool) -> Table:
+    """Remove known variable stars from a calibration catalogue."""
+    if not bool(cfg.get("calibration.screen_variables", True)) or len(table) == 0:
+        return table
+    known = cat.variable_stars(ra, dec, radius, cache_root, refresh=refresh)
+    if known is None or len(known) == 0:
+        return table
+    tol = float(cfg.get("calibration.variable_match_arcsec", 2.0))
+    here = SkyCoord(np.asarray(table["ra"]) * u.deg, np.asarray(table["dec"]) * u.deg)
+    there = SkyCoord(np.asarray(known["ra"]) * u.deg, np.asarray(known["dec"]) * u.deg)
+    idx, sep, _ = here.match_to_catalog_sky(there)
+    hit = sep.arcsec < tol
+    if hit.any():
+        log.info("dropped %d calibration star(s) matching a known variable "
+                 "(%s)", int(hit.sum()),
+                 ", ".join(sorted({str(known["otype"][i]) for i in idx[hit]})[:4]))
+    return table[~hit]
+
+
 def _calibrate_once(image, sources: Table, fwhm_px: float, cfg, cache_root: Path,
                     apcor_mag: float = 0.0, refresh: bool = False) -> ZeroPoint:
     """One pass at the zero point with the cuts exactly as given."""
@@ -221,6 +241,21 @@ def _calibrate_once(image, sources: Table, fwhm_px: float, cfg, cache_root: Path
         inst_err = np.where(flux > 0, 1.0857362 * flux_err / flux, np.nan)
 
     usable = (flags == 0) & np.isfinite(inst) & (snr > min_snr)
+
+    # A CCD stops being linear well below saturation, so an unsaturated star can
+    # still be too bright to calibrate on. The target is never subject to this:
+    # it is only ever applied to the field stars that set the zero point.
+    nonlinear_frac = float(cfg.get("calibration.nonlinear_frac", 0.85) or 0)
+    if nonlinear_frac > 0 and "peak" in phot.colnames:
+        peak = np.asarray(phot["peak"], dtype=float)
+        sky = float(image.qa.get("sky_adu", 0.0) or 0.0)
+        ceiling = sky + nonlinear_frac * (image.meta.saturation - sky)
+        too_bright = np.isfinite(peak) & (peak >= ceiling)
+        if too_bright.any():
+            log.debug("%s: %d calibration stars above the linear ceiling (%.0f ADU)",
+                      image.meta.path.name, int((too_bright & usable).sum()), ceiling)
+        usable &= ~too_bright
+
     if usable.sum() < min_stars:
         fail.message = f"only {int(usable.sum())} stars above SNR {min_snr:.0f}"
         return fail
@@ -246,6 +281,7 @@ def _calibrate_once(image, sources: Table, fwhm_px: float, cfg, cache_root: Path
             continue
 
         clean = cat.clean_catalog(table, band, cfg)
+        clean = _drop_variables(clean, cfg, ra0, dec0, radius, cache_root, refresh)
         if len(clean) < min_stars:
             messages.append(f"{provider}: {len(clean)} usable {band} entries")
             continue

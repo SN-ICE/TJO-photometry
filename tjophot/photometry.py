@@ -85,6 +85,7 @@ def measure_apertures(image, positions: Sequence[tuple[float, float]], radius_px
 
     # Flags: 1 = masked pixel inside the aperture, 2 = saturated, 4 = off-image
     flags = np.zeros(len(positions), dtype=int)
+    peak = np.full(len(positions), np.nan)
     ny, nx = image.data.shape
     for k, (x, y) in enumerate(positions):
         x0, x1 = int(np.floor(x - radius_px)), int(np.ceil(x + radius_px)) + 1
@@ -97,7 +98,16 @@ def measure_apertures(image, positions: Sequence[tuple[float, float]], radius_px
             flags[k] |= 1
         if np.any(sub >= image.meta.saturation):
             flags[k] |= 2
+        finite = sub[np.isfinite(sub)]
+        if finite.size:
+            peak[k] = float(finite.max())
     out["flags"] = flags
+    # Brightest pixel in the aperture. Saturation is a cliff, but a CCD stops
+    # being linear well below it, so a calibration star can be unsaturated and
+    # still too bright to trust. Reported rather than flagged, because the cut
+    # belongs to whoever is calibrating -- the target itself must not be
+    # dropped for being bright.
+    out["peak"] = peak
     return out
 
 
