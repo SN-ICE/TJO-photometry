@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
 import numpy as np
+import pandas as pd
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.table import Table
@@ -716,6 +717,56 @@ def _photometry_row(common: dict, method: str, flux: float, flux_err: float,
 
 
 # --------------------------------------------------------------------------
+def _flag_collapsed_kernels(frame, cfg):
+    """Flag difference measurements whose kernel solve collapsed.
+
+    The kernel sum is the flux scaling from reference to science. It is set by
+    the depth and units of the template, so there is no absolute value to test
+    against -- but every epoch of a band against the same reference should get
+    roughly the same one. An epoch that comes out orders of magnitude away has
+    not found a different scaling, it has failed to find one, and the flux
+    measured through it means nothing.
+
+    On SN2022xkq this is what separates the difference measurements that agree
+    with an independent reduction from those off by more than 0.3 mag: median
+    kernel sum 20.3 against 0.027. It also explains their suspiciously *low*
+    chi2 (0.36 against 5.5) -- a collapsed solve leaves an inflated noise model,
+    so the frame looks well fitted precisely because it was not fitted at all.
+    """
+    if not bool(cfg.get("subtraction.check_kernel_sum", True)) or frame.empty:
+        return frame
+    if "diff_kernel_sum" not in frame.columns:
+        return frame
+    tol = float(cfg.get("subtraction.kernel_sum_tolerance", 3.0))
+    if tol <= 1:
+        return frame
+
+    ks = pd.to_numeric(frame["diff_kernel_sum"], errors="coerce")
+    is_diff = frame["method"].astype(str).str.startswith("difference")
+    flagged = 0
+    for key, idx in frame[is_diff].groupby(
+            [frame["band"], frame.get("ref_source", "")]).groups.items():
+        vals = ks.loc[idx]
+        good = vals[np.isfinite(vals) & (vals > 0)]
+        if len(good) < 5:
+            continue
+        ref = float(np.median(good))
+        if not np.isfinite(ref) or ref <= 0:
+            continue
+        bad = idx[(~np.isfinite(vals)) | (vals <= 0)
+                  | (vals > ref * tol) | (vals < ref / tol)]
+        if len(bad):
+            frame.loc[bad, "flags"] = (frame.loc[bad, "flags"].fillna(0).astype(int)
+                                       | lc.FLAG_BAD_SUBTRACTION)
+            flagged += len(bad)
+            log.info("%s %s: %d of %d difference epochs have a kernel sum far from "
+                     "the band median (%.3g); flagged as bad subtractions",
+                     key[0], key[1] or "reference", len(bad), len(idx), ref)
+    if flagged:
+        frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")))
+    return frame
+
+
 def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
         max_images: Optional[int] = None, refresh: bool = False,
         skip_subtraction: bool = False, append: bool = False,
@@ -825,6 +876,7 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
         raise RuntimeError("no photometry could be measured")
 
     frame = lc.to_frame(rows)
+    frame = _flag_collapsed_kernels(frame, cfg)
 
     if bool(cfg.get("calibration.transfer_zeropoints", True)):
         frame, transfer_report = zeropoints.transfer(frame, cfg)
