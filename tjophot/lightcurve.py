@@ -21,6 +21,8 @@ COLUMNS = [
     "apcor", "apcor_err", "aperture_radius_px",
     "fwhm_arcsec", "sky_adu", "sky_rms_adu", "exptime", "airmass",
     "astrom_rms_arcsec", "astrom_nstars", "detector", "pattern_applied", "fringe_scale_adu",
+    "diff_verdict", "diff_dipole_fraction", "diff_quality_nsources",
+    "diff_residual_sigma", "diff_target_dipole",
     "ref_source", "ref_band", "ref_nimages", "diff_mode", "diff_chi2", "diff_kernel_sum", "diff_nstamps",
     "x", "y", "dx", "dy", "flags", "quality", "image",
 ]
@@ -41,6 +43,7 @@ FLAG_CROSS_BAND_TEMPLATE = 256   # the template was taken in a different filter
 FLAG_ZP_TRANSFERRED = 512        # zero point borrowed from another band, same night
 FLAG_APPROX_OFFSET = 1024        # recalculated without the exact magnitude offset
 FLAG_RELAXED_CALIBRATION = 2048  # zero point needed loosened star-selection cuts
+FLAG_DIPOLE_RESIDUAL = 4096      # the difference leaves dipoles: the reference is misregistered
 
 FLAG_NAMES = {
     FLAG_MASKED_PIXEL: "masked_pixel", FLAG_SATURATED: "saturated",
@@ -172,7 +175,7 @@ def write(frame: pd.DataFrame, outdir: Path, target: str,
         "target", "mjd", "band", "system", "mag", "mag_err", "limit_mag", "is_limit",
         "flux", "flux_err", "snr", "zp", "zp_err", "zp_source", "fwhm_arcsec",
         "astrom_rms_arcsec",
-        "detector", "pattern_applied", "method",
+        "detector", "pattern_applied", "method", "diff_verdict",
         "cal_provider", "cal_nstars", "cal_rms", "ref_source", "flags", "flags_str", "image",
     ]]
     slim.to_csv(lc_path, index=False, float_format="%.6f")

@@ -268,6 +268,18 @@ subtraction:
   cutout_arcmin: auto
                                # (bigger = more stars for the kernel and the PSF)
   max_chi2: 2.5                # above this the difference is flagged as unreliable
+  # The chi2 above is measured on the bright stars the kernel was fitted to, so
+  # it reports that the PSF match worked there -- not that the subtraction is
+  # clean on the host. This judges the shape of what is left behind instead. A
+  # flux mismatch leaves a one-signed blob; a registration error leaves a
+  # dipole, which no rescaling can remove.
+  quality:
+    enabled: true
+    dipole_nsigma: 5.0         # both lobes must exceed this
+    dipole_antisymmetry: 0.3   # weaker lobe over stronger, so a detection is not a dipole
+    min_sources: 8             # below this there is nothing to judge on
+    dipole_warn: 0.05          # this fraction of sources dipolar -> downgrade
+    dipole_fail: 0.20          # -> fail, flagged as a bad subtraction
   tjo_stack:
     mjd_min: null              # epochs used to build the target's own template
     mjd_max: null

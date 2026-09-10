@@ -471,7 +471,7 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
         if diff.ok:
             rows.extend(_difference_rows(diff, image, cfg, coord, common, zp, limit,
                                          science_epsf=epsf, science_apcor=apcor.apcor_mag,
-                                         science_psf_corr=psf_corr))
+                                         science_psf_corr=psf_corr, sources=sources))
 
     if bool(cfg.get("output.write_qa_plots", True)):
         plots.epoch_qa(Path(outdir) / "qa" /
@@ -489,7 +489,7 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
 
 def _difference_rows(diff, image, cfg, coord, common, zp, limit,
                      science_epsf=None, science_apcor: float = 0.0,
-                     science_psf_corr: float = 0.0) -> list[dict]:
+                     science_psf_corr: float = 0.0, sources=None) -> list[dict]:
     """Aperture and PSF photometry on the difference image.
 
     When the reference was the frame that got convolved, the difference keeps
@@ -520,12 +520,34 @@ def _difference_rows(diff, image, cfg, coord, common, zp, limit,
     if ref_band and ref_band != image.meta.band:
         bad_subtraction |= lc.FLAG_CROSS_BAND_TEMPLATE
 
+    # The kernel chi2 above is measured on bright field stars. This is measured
+    # on the shape of what is left behind, which is what distinguishes a
+    # misregistered reference from a merely mis-scaled one.
+    from . import diffquality
+    field_xy = []
+    if sources is not None and len(sources) and diff.wcs is not None:
+        try:
+            fx, fy = diff.wcs.world_to_pixel(SkyCoord(
+                np.asarray(sources["ra"]) * u.deg, np.asarray(sources["dec"]) * u.deg))
+            field_xy = np.column_stack([fx, fy])
+        except Exception:
+            field_xy = []
+    quality = diffquality.assess(diff, field_xy, fwhm, cfg, target_xy=sn_xy)
+    if quality.verdict == "fail":
+        bad_subtraction |= lc.FLAG_DIPOLE_RESIDUAL | lc.FLAG_BAD_SUBTRACTION
+    elif quality.verdict == "downgrade":
+        bad_subtraction |= lc.FLAG_DIPOLE_RESIDUAL
+    if quality.message:
+        log.info("%s: difference %s -- %s", image.meta.path.name,
+                 quality.verdict, quality.message)
+
     diff_meta = dict(
         ref_source=diff.meta.get("reference_source"),
         ref_band=diff.meta.get("reference_band"),
         ref_nimages=diff.meta.get("reference_n_images"),
         diff_mode=diff.mode, diff_chi2=diff.chi2,
         diff_kernel_sum=diff.kernel_sum, diff_nstamps=diff.n_stamps,
+        **quality.as_dict(),
     )
 
     # Aperture correction measured on the matched image, which shares the PSF
