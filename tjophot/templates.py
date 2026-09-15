@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
 
+import re
+
 import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
@@ -81,6 +83,72 @@ def from_file(path, band: str) -> ReferenceImage:
     log.info("reference for %s: file %s", band, path.name)
     return ReferenceImage(data, wcs, band, "file", scale, source_band=band,
                           header=header, path=path)
+
+
+def find_local_template(cfg, target: str, band: str, instrument: Optional[dict] = None):
+    """The best template for *band* in this target's own template directory.
+
+    Templates you took yourself always beat anything downloaded: same sky, no
+    bandpass guesswork, and -- for B, V, R and I, where no all-sky CCD survey
+    exists -- the alternative is a photographic plate that cannot be PSF-matched
+    to a CCD frame at all.
+
+    The directory is ``<subtraction.template_dir>/<TARGET>/``. Band comes from
+    each file's own FILTER header, falling back to the filename, and the match
+    is case sensitive on purpose: Johnson I and SDSS i are different filters and
+    conflating them would subtract the wrong bandpass silently. Where a band has
+    several files -- an acquisition frame and a deep one, say -- the longest
+    exposure wins.
+    """
+    root = cfg.resolve_path(cfg.get("subtraction.template_dir"))
+    if root is None:
+        return None
+    folder = Path(root) / target
+    if not folder.is_dir():
+        return None
+
+    patterns = cfg.get("subtraction.template_glob",
+                       ["*.fits", "*.fit", "*.fits.gz", "*.fits.fz"])
+    files = []
+    for pattern in patterns:
+        files.extend(sorted(folder.glob(pattern)))
+    files = sorted(set(files))
+    if not files:
+        return None
+
+    filters = (instrument or {}).get("filters", {}) or {}
+    best, best_exp = None, -1.0
+    for path in files:
+        try:
+            header = fits.getheader(path)
+        except Exception as exc:
+            log.warning("template %s is unreadable (%s)", path.name, exc)
+            continue
+        raw = str(header.get("FILTER", header.get("FILTER1", "")) or "").strip()
+        found = filters.get(raw, raw) if raw else ""
+        if not found:
+            # No usable FILTER: take the band from the filename, which for
+            # Swope-style names is the token after the object, e.g. 2025bri_V01.
+            parts = re.split(r"[_.\-]", path.stem)
+            for token in parts[1:]:
+                stripped = token.rstrip("0123456789")
+                if stripped and (stripped in filters or len(stripped) <= 2):
+                    found = filters.get(stripped, stripped)
+                    break
+        if found != band:                      # case sensitive: I is not i
+            continue
+        try:
+            exposure = float(header.get("EXPTIME", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            exposure = 0.0
+        if exposure > best_exp:
+            best, best_exp = path, exposure
+
+    if best is None:
+        return None
+    if best_exp > 0:
+        log.info("reference for %s: local template %s (%.0f s)", band, best.name, best_exp)
+    return best
 
 
 def build_tjo_stack(images: Sequence, cfg, coord: SkyCoord, band: str,
@@ -532,7 +600,8 @@ def linearise_ps1(data: np.ndarray, header: fits.Header) -> np.ndarray:
 def get_reference(image, cfg, cache_root: Path, coord: SkyCoord,
                   siblings: Sequence, target: str,
                   refresh: bool = False,
-                  stamp_arcmin: Optional[float] = None) -> Optional[ReferenceImage]:
+                  stamp_arcmin: Optional[float] = None,
+                  instrument: Optional[dict] = None) -> Optional[ReferenceImage]:
     """Return the first reference image that a configured source can provide."""
     band = image.meta.band
     order = cfg.get(f"subtraction.reference_sources.{band}") or \
@@ -553,11 +622,19 @@ def get_reference(image, cfg, cache_root: Path, coord: SkyCoord,
     for source in order:
         try:
             if source == "file":
+                # An explicit path in the target file wins; otherwise look in
+                # this target's own template directory.
                 path = cfg.resolve_path(cfg.get(f"subtraction.reference_files.{band}"))
+                if path is None:
+                    path = find_local_template(cfg, target, band, instrument)
                 if path:
-                    ref = from_file(path, band)
-                    ref.source_band = band
-                    return ref
+                    if not Path(path).exists():
+                        log.warning("reference_files.%s points at %s, which does not "
+                                    "exist; trying the next source", band, path)
+                    else:
+                        ref = from_file(path, band)
+                        ref.source_band = band
+                        return ref
             elif source == "tjo_stack":
                 ref = build_tjo_stack(siblings, cfg, coord, band,
                                       exclude_mjd=image.meta.mjd, cache_root=cache_root,

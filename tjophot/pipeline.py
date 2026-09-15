@@ -355,7 +355,7 @@ def build_references(cfg, index: Sequence[EpochIndex], instrument: dict, coord: 
         try:
             references[band] = tpl.get_reference(
                 _FakeImage(band), cfg, cache_root, coord, siblings, target,
-                refresh=refresh, stamp_arcmin=stamp_arcmin)
+                refresh=refresh, stamp_arcmin=stamp_arcmin, instrument=instrument)
         except Exception as exc:
             log.warning("reference for band %s failed: %s", band, exc)
             references[band] = None
@@ -737,8 +737,9 @@ def _flag_collapsed_kernels(frame, cfg):
         return frame
     if "diff_kernel_sum" not in frame.columns:
         return frame
-    tol = float(cfg.get("subtraction.kernel_sum_tolerance", 3.0))
-    if tol <= 1:
+    nsigma = float(cfg.get("subtraction.kernel_sum_nsigma", 5.0))
+    floor = float(cfg.get("subtraction.kernel_sum_floor_dex", 0.35))
+    if nsigma <= 0:
         return frame
 
     ks = pd.to_numeric(frame["diff_kernel_sum"], errors="coerce")
@@ -748,20 +749,28 @@ def _flag_collapsed_kernels(frame, cfg):
             [frame["band"], frame.get("ref_source", "")]).groups.items():
         vals = ks.loc[idx]
         good = vals[np.isfinite(vals) & (vals > 0)]
-        if len(good) < 5:
+        if len(good) < 8:
             continue
-        ref = float(np.median(good))
-        if not np.isfinite(ref) or ref <= 0:
-            continue
-        bad = idx[(~np.isfinite(vals)) | (vals <= 0)
-                  | (vals > ref * tol) | (vals < ref / tol)]
+        # In log space, and against the spread this band actually shows. The
+        # kernel sum scales with the frame's throughput, so a campaign spanning
+        # a magnitude or two of transparency spreads it over a factor of tens
+        # legitimately -- a fixed tolerance flags most of a good griz season.
+        # A collapsed solve is not merely off-centre, it is orders out.
+        logs = np.log10(good.astype(float))
+        centre = float(np.median(logs))
+        spread = max(float(np.median(np.abs(logs - centre))) * 1.4826, floor)
+        lo, hi = centre - nsigma * spread, centre + nsigma * spread
+        with np.errstate(divide="ignore", invalid="ignore"):
+            lv = np.log10(vals.astype(float).where(vals > 0))
+        bad = idx[(~np.isfinite(vals)) | (vals <= 0) | (lv < lo) | (lv > hi)]
         if len(bad):
             frame.loc[bad, "flags"] = (frame.loc[bad, "flags"].fillna(0).astype(int)
                                        | lc.FLAG_BAD_SUBTRACTION)
             flagged += len(bad)
-            log.info("%s %s: %d of %d difference epochs have a kernel sum far from "
-                     "the band median (%.3g); flagged as bad subtractions",
-                     key[0], key[1] or "reference", len(bad), len(idx), ref)
+            log.info("%s %s: %d of %d difference epochs have a kernel sum outside "
+                     "10^[%.2f, %.2f] (band median %.3g); flagged as bad subtractions",
+                     key[0], key[1] or "reference", len(bad), len(idx),
+                     lo, hi, 10 ** centre)
     if flagged:
         frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")))
     return frame

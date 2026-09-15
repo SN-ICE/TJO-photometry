@@ -134,6 +134,14 @@ of the stamp. The pipeline probes the neighbouring skycells and fills the gap
 B and V have no Pan-STARRS counterpart of their own, and no CCD survey covers
 them all-sky. Three ways round that, best first:
 
+0. **Drop them in the template folder.** Anything you already have -- Swope,
+   LCO, another telescope's stack -- goes in `~/Desktop/TJO/templates/<NAME>/`
+   and is picked up automatically, before anything is downloaded. The band comes
+   from each file's own FILTER header, so the filenames do not matter; where a
+   band has several files the longest exposure wins. Matching is case sensitive,
+   so Johnson I is never confused with SDSS i. Change the location with
+   `subtraction.template_dir`.
+
 1. **Take your own.** A set of deep TJO B and V images of the field, once the
    supernova is gone, is the ideal template: same telescope, same filters, same
    pixel scale, no colour term at all. Point `reference_files` at them.

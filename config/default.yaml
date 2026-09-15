@@ -224,6 +224,15 @@ subtraction:
   #   file       : explicit path, set in the target file
   #   tjo_stack  : stack of this target's own TJO epochs (see template_epochs)
   #   panstarrs  : PS1 DR2 stacked cutout downloaded from MAST (g,r,i,z,y only)
+  # Templates you took yourself, found by convention rather than by listing a
+  # path per band. Searched as <template_dir>/<TARGET>/ and matched on each
+  # file's FILTER header (filename as a fallback); where a band has more than
+  # one file the longest exposure wins. This is consulted by the 'file' source,
+  # which is first in every list below, so a local template always beats a
+  # download -- which matters most for B, V, R and I, where the alternative is
+  # a photographic plate that cannot be PSF-matched to a CCD frame.
+  template_dir: ~/Desktop/TJO/templates
+  template_glob: ["*.fits", "*.fit", "*.fits.gz", "*.fits.fz"]
   reference_sources:
     B: [file, hips, tjo_stack]
     V: [file, hips, tjo_stack]
@@ -289,7 +298,8 @@ subtraction:
   # factor of this away has not found a different scaling, it has failed to
   # find one, and its flux means nothing.
   check_kernel_sum: true
-  kernel_sum_tolerance: 3.0
+  kernel_sum_nsigma: 5.0       # robust sigma, in log10(kernel sum), within a band
+  kernel_sum_floor_dex: 0.35   # never tighter than this, however tight the band is
   # The chi2 above is measured on the bright stars the kernel was fitted to, so
   # it reports that the PSF match worked there -- not that the subtraction is
   # clean on the host. This judges the shape of what is left behind instead. A

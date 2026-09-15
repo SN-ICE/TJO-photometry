@@ -48,6 +48,9 @@ subtraction:
     R: r
     I: i
 
+  # Templates you already have go in <subtraction.template_dir>/<NAME>/ and are
+  # found automatically by their FILTER header -- no path needed here. Use
+  # reference_files only to point at something outside that folder.
   # Your own templates win over everything -- 'file' is first in every list.
   # reference_files:
   #   B: ~/Desktop/TJO/refs/SN2027xyz_ref_B.fits
