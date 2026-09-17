@@ -1,0 +1,6 @@
+# SN2025gvs -- written by 'tjophot resolve'.
+target:
+  name: SN2025gvs
+  # position resolved from TNS on 2026-09-10 (object_type=SN II, redshift=0.007165, hostname=UGC10058)
+  ra: 237.5974896
+  dec: 25.9194515

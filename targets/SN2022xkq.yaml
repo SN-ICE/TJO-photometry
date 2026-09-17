@@ -1,0 +1,6 @@
+# SN2022xkq -- written by 'tjophot resolve'.
+target:
+  name: SN2022xkq
+  # position resolved from SIMBAD on 2026-09-16
+  ra: 76.3487917
+  dec: -11.8822500

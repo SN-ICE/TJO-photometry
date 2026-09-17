@@ -1,0 +1,6 @@
+# TDE2025bri -- written by 'tjophot resolve'.
+target:
+  name: TDE2025bri
+  # position resolved from TNS on 2026-09-15 (object_type=TDE-He, redshift=0.061, hostname=WISEA J141040.43-104756.9)
+  ra: 212.6684927
+  dec: -10.7991667

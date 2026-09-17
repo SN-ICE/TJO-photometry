@@ -1,0 +1,6 @@
+# SN2023ixf -- written by 'tjophot resolve'.
+target:
+  name: SN2023ixf
+  # position resolved from TNS on 2026-09-16 (object_type=SN II, redshift=0.0008, hostname=NGC5457, M101)
+  ra: 210.9106746
+  dec: 54.3116511

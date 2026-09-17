@@ -4,7 +4,7 @@ target:
   # Position: replace with the TNS/discovery coordinates for precise forced
   # photometry. If left unset the pipeline falls back to the telescope
   # pointing (OBJRA/OBJDEC), which is good to a few arcsec at best.
-  # position resolved from TNS on 2026-09-07 (object_type=SN Ia, redshift=0.00758, hostname=NGC4168)
+  # position resolved from TNS on 2026-09-10 (object_type=SN Ia, redshift=0.00758, hostname=NGC4168)
   ra: 183.0531491
   dec: 13.2217510
 

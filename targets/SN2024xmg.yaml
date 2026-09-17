@@ -1,0 +1,6 @@
+# SN2024xmg -- written by 'tjophot resolve'.
+target:
+  name: SN2024xmg
+  # position resolved from TNS on 2026-09-09 (object_type=SN Ib/c, redshift=0.042)
+  ra: 355.7254621
+  dec: 28.0251940

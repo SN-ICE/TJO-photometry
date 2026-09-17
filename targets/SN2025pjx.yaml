@@ -1,0 +1,6 @@
+# SN2025pjx -- written by 'tjophot resolve'.
+target:
+  name: SN2025pjx
+  # position resolved from TNS on 2026-09-10 (object_type=SN II, redshift=0.015, hostname=UGC00542)
+  ra: 13.3558882
+  dec: 29.2784565

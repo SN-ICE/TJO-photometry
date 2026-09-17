@@ -1,0 +1,6 @@
+# SN2026fvx -- written by 'tjophot resolve'.
+target:
+  name: SN2026fvx
+  # position resolved from TNS on 2026-09-09 (object_type=SN Ia, redshift=0.004846, hostname=NGC4205)
+  ra: 183.7422226
+  dec: 63.7878905

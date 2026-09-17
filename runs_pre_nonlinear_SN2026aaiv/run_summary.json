@@ -1,0 +1,224 @@
+{
+  "target": "SN2026aaiv",
+  "config_files": [
+    "default.yaml",
+    "tns.yaml",
+    "targets/SN2026aaiv.yaml"
+  ],
+  "n_images": 48,
+  "n_rows": 174,
+  "n_failures": 0,
+  "failures": [],
+  "bands": [
+    "B",
+    "V",
+    "g",
+    "i",
+    "r",
+    "z"
+  ],
+  "coord": "22h37m05.628s +34d24m35.190s",
+  "position_refined_by_arcsec": null,
+  "position_from_config": true,
+  "elapsed_s": 671.2,
+  "zeropoint_transfer": {
+    "recovered": 0,
+    "unrecovered": 0,
+    "band_offsets": {
+      "B-V": [
+        0.2216,
+        0.0151,
+        7
+      ],
+      "B-g": [
+        -0.5063,
+        0.012,
+        7
+      ],
+      "B-i": [
+        0.2332,
+        0.0558,
+        7
+      ],
+      "B-r": [
+        -0.3855,
+        0.0161,
+        7
+      ],
+      "B-z": [
+        0.9703,
+        0.0376,
+        7
+      ],
+      "V-B": [
+        -0.2216,
+        0.0151,
+        7
+      ],
+      "V-g": [
+        -0.7265,
+        0.0387,
+        7
+      ],
+      "V-i": [
+        0.0174,
+        0.0134,
+        7
+      ],
+      "V-r": [
+        -0.6045,
+        0.0028,
+        7
+      ],
+      "V-z": [
+        0.7669,
+        0.0205,
+        7
+      ],
+      "g-B": [
+        0.5063,
+        0.012,
+        7
+      ],
+      "g-V": [
+        0.7265,
+        0.0387,
+        7
+      ],
+      "g-i": [
+        0.7406,
+        0.026,
+        7
+      ],
+      "g-r": [
+        0.1227,
+        0.0095,
+        7
+      ],
+      "g-z": [
+        1.4899,
+        0.0285,
+        7
+      ],
+      "i-B": [
+        -0.2332,
+        0.0558,
+        7
+      ],
+      "i-V": [
+        -0.0174,
+        0.0134,
+        7
+      ],
+      "i-g": [
+        -0.7406,
+        0.026,
+        7
+      ],
+      "i-r": [
+        -0.6203,
+        0.0141,
+        7
+      ],
+      "i-z": [
+        0.749,
+        0.0233,
+        7
+      ],
+      "r-B": [
+        0.3855,
+        0.0161,
+        7
+      ],
+      "r-V": [
+        0.6045,
+        0.0028,
+        7
+      ],
+      "r-g": [
+        -0.1227,
+        0.0095,
+        7
+      ],
+      "r-i": [
+        0.6203,
+        0.0141,
+        7
+      ],
+      "r-z": [
+        1.3703,
+        0.0243,
+        7
+      ],
+      "z-B": [
+        -0.9703,
+        0.0376,
+        7
+      ],
+      "z-V": [
+        -0.7669,
+        0.0205,
+        7
+      ],
+      "z-g": [
+        -1.4899,
+        0.0285,
+        7
+      ],
+      "z-i": [
+        -0.749,
+        0.0233,
+        7
+      ],
+      "z-r": [
+        -1.3703,
+        0.0243,
+        7
+      ]
+    }
+  },
+  "references": {
+    "B": {
+      "source": "hips",
+      "band": "B",
+      "path": "/Users/lluisgalbany/Desktop/TJO/pipeline/cache/templates/hips_CDS-P-DSS2-blue_339.27345+34.40978_675.fits",
+      "pixel_scale_arcsec": 1.0,
+      "n_images": 1
+    },
+    "V": {
+      "source": "hips",
+      "band": "V",
+      "path": "/Users/lluisgalbany/Desktop/TJO/pipeline/cache/templates/hips_CDS-P-DSS2-red_339.27345+34.40978_675.fits",
+      "pixel_scale_arcsec": 1.0,
+      "n_images": 1
+    },
+    "g": {
+      "source": "panstarrs",
+      "band": "g",
+      "path": "/Users/lluisgalbany/Desktop/TJO/pipeline/cache/templates/ps1_339.27345+34.40978_g-sdss_2700.fits",
+      "pixel_scale_arcsec": 0.25,
+      "n_images": 1
+    },
+    "i": {
+      "source": "panstarrs",
+      "band": "i",
+      "path": "/Users/lluisgalbany/Desktop/TJO/pipeline/cache/templates/ps1_339.27345+34.40978_i-sdss_2700.fits",
+      "pixel_scale_arcsec": 0.25,
+      "n_images": 1
+    },
+    "r": {
+      "source": "panstarrs",
+      "band": "r",
+      "path": "/Users/lluisgalbany/Desktop/TJO/pipeline/cache/templates/ps1_339.27345+34.40978_r-sdss_2700.fits",
+      "pixel_scale_arcsec": 0.25,
+      "n_images": 1
+    },
+    "z": {
+      "source": "panstarrs",
+      "band": "z",
+      "path": "/Users/lluisgalbany/Desktop/TJO/pipeline/cache/templates/ps1_339.27345+34.40978_z-sdss_2700.fits",
+      "pixel_scale_arcsec": 0.25,
+      "n_images": 1
+    }
+  }
+}

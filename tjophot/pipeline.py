@@ -440,6 +440,23 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
     sn_xy = image.pixel_of(coord)
     rows: list[dict] = []
 
+    # How much of the target's core sits above the linear range. The aperture
+    # sum loses those pixels outright and the PSF fit reconstructs them from
+    # the wings, so this decides both the flag and the extra uncertainty.
+    core_hot, core_masked = ph.nonlinear_core(image, sn_xy[0], sn_xy[1], fwhm)
+    core_min = int(cfg.get("photometry.nonlinear_core_min_px", 3))
+    core_repaired = core_hot >= core_min
+    core_flag = lc.FLAG_NONLINEAR_CORE if core_repaired else 0
+    core_syst = float(cfg.get("photometry.nonlinear_core_syst_mag", 0.05)) \
+        if core_repaired else 0.0
+    common["core_nonlinear_px"] = int(core_hot)
+    common["core_masked_px"] = int(core_masked)
+    common["core_syst_mag"] = core_syst
+    common["flags_base"] = int(common.get("flags_base", 0)) | core_flag
+    if core_repaired:
+        log.info("%s: %d core pixels above the linear ceiling -- flux fitted on "
+                 "the wings", image.meta.path.name, core_hot)
+
     # ---------------------------------------------------------------- direct
     tab = ph.measure_apertures(image, [sn_xy], ap_radius, cfg, annulus_px=annulus)
     sky_sigma = ph.blank_aperture_noise(image, ap_radius, cfg) \
@@ -696,6 +713,11 @@ def _photometry_row(common: dict, method: str, flux: float, flux_err: float,
     """Turn a flux measurement into a calibrated row."""
     common = dict(common)
     flags = int(flags) | int(common.pop("flags_base", 0))
+    # Reconstructing a compressed core from the wings recovers the flux but not
+    # for free: against an independently built PSF the injection test lands 3-6
+    # per cent low, so carry that as a systematic rather than reporting the
+    # usual hundredth-of-a-magnitude error on a repaired point.
+    core_syst = float(common.pop("core_syst_mag", 0.0) or 0.0)
     exptime = max(image.meta.exptime, 1e-6)
     snr = flux / flux_err if (np.isfinite(flux_err) and flux_err > 0) else np.nan
 
@@ -706,6 +728,8 @@ def _photometry_row(common: dict, method: str, flux: float, flux_err: float,
         inst = -2.5 * np.log10(flux / exptime) + apcor_mag
         mag = inst + zp.zp
         mag_err = float(np.hypot(1.0857362 * flux_err / flux, zp.zp_err))
+        if core_syst:
+            mag_err = float(np.hypot(mag_err, core_syst))
         is_limit = False
 
     return lc.new_row(

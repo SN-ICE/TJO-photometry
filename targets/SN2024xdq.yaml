@@ -1,0 +1,6 @@
+# SN2024xdq -- written by 'tjophot resolve'.
+target:
+  name: SN2024xdq
+  # position resolved from TNS on 2026-09-17 (object_type=SN II, redshift=0.023, hostname=PGC2007452)
+  ra: 52.6438743
+  dec: 32.6718831

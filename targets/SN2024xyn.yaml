@@ -1,0 +1,6 @@
+# SN2024xyn -- written by 'tjophot resolve'.
+target:
+  name: SN2024xyn
+  # position resolved from TNS on 2026-09-10 (object_type=SN Ia, redshift=0.021522)
+  ra: 39.8498710
+  dec: 2.6521890

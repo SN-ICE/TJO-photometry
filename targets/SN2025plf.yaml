@@ -1,0 +1,6 @@
+# SN2025plf -- written by 'tjophot resolve'.
+target:
+  name: SN2025plf
+  # position resolved from TNS on 2026-09-10 (object_type=SN Ia, redshift=0.016, hostname=UGC12454)
+  ra: 348.7878242
+  dec: 9.6726801

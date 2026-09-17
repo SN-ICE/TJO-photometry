@@ -1,0 +1,515 @@
+instrument: tjo_meia2
+instruments:
+  MEIA2: tjo_meia2
+  MEIA3: tjo_meia3
+tns:
+  api_key: <redacted>
+  bot_id: 166224
+  bot_name: ICESN
+target:
+  ra: 339.2734487
+  dec: 34.409775
+  resolve: auto
+  resolve_sources:
+  - tns
+  - simbad
+  resolve_write: true
+  refine: auto
+  refine_radius_arcsec: 3.0
+  name: SN2026aaiv
+paths:
+  data_root: ~/Desktop/TJO/finalfiles
+  work_root: runs
+  cache_root: cache
+astrometry:
+  mode: linear
+  catalog: gaia_astrometry
+  fallback_catalogs:
+  - gaia_synth
+  - panstarrs
+  - local
+  search_radius_arcmin: auto
+  max_mag: 20.0
+  match_radius_arcsec: 3.0
+  final_match_radius_arcsec: 1.0
+  min_stars: 8
+  sip_degree: 2
+  iterations: 2
+  sigma_clip: 3.0
+  max_shift_arcsec: 30.0
+  max_rms_arcsec: 2.0
+image:
+  saturation_adu: null
+  edge_margin_arcsec: 9.0
+  cosmic_rays:
+    enabled: true
+    sigclip: 4.5
+    sigfrac: 0.3
+    objlim: 10.0
+    iterations: 4
+    dilate: 1
+    protect_nsigma: 5.0
+    min_star_pixels: 4
+    max_fraction: 0.02
+    reject_within_fwhm: 1.0
+  outlier_sigma: 30.0
+  bad_value_mask:
+  - 0.0
+  pattern:
+    enabled: true
+    calib_root: calib
+    block: 16
+    smooth_blocks: 24.0
+    min_frames: 8
+    max_amplitude: 0.08
+    min_fields: 2
+    max_frames: 60
+    fit_fringe_scale: true
+    max_fringe_fraction: 0.5
+    min_flatness_gain: 1.05
+  background:
+    box_arcsec: 46.0
+    min_cells: 12
+    filter_size: 5
+    sigma_clip: 3.0
+detection:
+  threshold_sigma: 5.0
+  fwhm_init_arcsec: 2.0
+  fwhm_min_arcsec: 0.8
+  fwhm_max_arcsec: 8.0
+  sharplo: 0.2
+  sharphi: 1.0
+  roundlo: -0.75
+  roundhi: 0.75
+  min_stars_for_fwhm: 6
+  max_stars_for_fwhm: 40
+photometry:
+  aperture_scale: 1.2
+  curve_of_growth_scales:
+  - 0.5
+  - 0.75
+  - 1.0
+  - 1.25
+  - 1.5
+  - 2.0
+  - 2.5
+  - 3.0
+  - 4.0
+  - 5.0
+  apcor_scale: 4.0
+  annulus_scale:
+  - 5.0
+  - 8.0
+  min_apcor_stars: 5
+  isolation_scale: 3.0
+  local_bkg: annulus
+  empirical_errors: true
+  psf:
+    enabled: true
+    oversampling: 1
+    smoothing_kernel: null
+    fwhm_tolerance: 0.25
+    stamp_scale: 5.0
+    maxiters: 6
+    min_stars: 5
+    fit_shape_scale: 1.5
+    recentre: true
+    recentre_max_px: 2.0
+calibration:
+  catalogs:
+  - gaia_synth
+  - panstarrs
+  - apass
+  search_radius_arcmin: auto
+  match_radius_arcsec: 1.5
+  min_snr: 20.0
+  nonlinear_frac: 0.85
+  screen_variables: true
+  injection:
+    enabled: true
+    n_sites: 40
+    min_sites: 12
+    snr: 3.0
+    completeness: 0.5
+    min_radius_fwhm: 2.0
+    max_radius_fwhm: 6.0
+    step_mag: 0.5
+    max_steps: 14
+    bisect_steps: 6
+    min_for_error_scale: 20
+  variable_match_arcsec: 2.0
+  min_stars: 5
+  relax_when_short: true
+  min_stars_floor: 3
+  max_cat_err:
+    default: 0.05
+    apass: 0.12
+  mag_range:
+  - 11.0
+  - 19.0
+  sigma_clip: 3.0
+  color_term: fit
+  color_term_max: 0.6
+  color_term_fixed: {}
+  color_pivot:
+    B: 0.65
+    V: 0.65
+    g: 0.45
+    r: 0.35
+    i: 0.3
+    z: 0.3
+  zp_error_floor: 0.01
+  max_rms: 0.25
+  transfer_zeropoints: true
+  transfer_min_nights: 3
+  transfer_max_scatter: 0.25
+  transfer_error_floor: 0.03
+  limiting_sigma: 3.0
+subtraction:
+  enabled: true
+  template_dir: ~/Desktop/TJO/templates
+  template_glob:
+  - '*.fits'
+  - '*.fit'
+  - '*.fits.gz'
+  - '*.fits.fz'
+  reference_sources:
+    B:
+    - file
+    - hips
+    - tjo_stack
+    V:
+    - file
+    - hips
+    - tjo_stack
+    R:
+    - file
+    - panstarrs
+    - hips
+    - tjo_stack
+    I:
+    - file
+    - panstarrs
+    - hips
+    - tjo_stack
+    g:
+    - file
+    - panstarrs
+    - hips
+    - tjo_stack
+    r:
+    - file
+    - panstarrs
+    - hips
+    - tjo_stack
+    i:
+    - file
+    - panstarrs
+    - hips
+    - tjo_stack
+    z:
+    - file
+    - panstarrs
+    - hips
+    - tjo_stack
+    default:
+    - file
+    - tjo_stack
+  hips:
+    B:
+      survey: dss2-blue
+    V:
+      survey: dss2-red
+    R:
+      survey: dss2-red
+    I:
+      survey: dss2-nir
+  hips_max_pixels: 4000
+  panstarrs:
+    size_arcmin: null
+    max_size_px: 3200
+    timeout_s: 600.0
+    mosaic: true
+  reference_band:
+    R: r
+    I: i
+  convolve_science_ratio: 1.25
+  cutout_arcmin: auto
+  max_chi2: 2.5
+  check_kernel_sum: true
+  kernel_sum_nsigma: 5.0
+  kernel_sum_floor_dex: 0.35
+  quality:
+    enabled: true
+    dipole_nsigma: 5.0
+    dipole_antisymmetry: 0.3
+    min_sources: 8
+    dipole_warn: 0.15
+    dipole_fail: 0.3
+    alignment_warn: 0.45
+  tjo_stack:
+    mjd_min: null
+    mjd_max: null
+    exclude_science: true
+    min_images: 2
+    combine: median
+  kernel:
+    gauss_sigmas_px:
+    - 0.7
+    - 1.5
+    - 3.0
+    gauss_degrees:
+    - 4
+    - 2
+    - 0
+    half_size_px: 9
+    spatial_order: 0
+    background_order: 1
+    n_stamps: 40
+    stamp_half_px: 20
+    sigma_clip: 3.0
+    max_iter: 3
+output:
+  primary_method: auto
+  write_diagnostics: true
+  write_qa_plots: true
+  write_stamps: true
+  stamp_arcsec: 60.0
+  overwrite: false
+_config_files:
+- default.yaml
+- tns.yaml
+- targets/SN2026aaiv.yaml
+instrument_config:
+  name: TJO/MEIA2
+  telescope: TJO
+  site: OAdM
+  header:
+    mjd:
+    - MJD-OBS
+    jd:
+    - JD
+    dateobs:
+    - DATE-OBS
+    timeobs:
+    - TIME-OBS
+    exptime:
+    - EXPTIME
+    filter:
+    - FILTER
+    object:
+    - OBJECT
+    - TARGET
+    gain:
+    - GAIN
+    readnoise:
+    - RDNOISE
+    target_ra:
+    - OBJRA
+    - RA
+    target_dec:
+    - OBJDEC
+    - DEC
+    binning_x:
+    - XFACTOR
+    binning_y:
+    - YFACTOR
+    airmass:
+    - AIRMASS
+    imagetype:
+    - IMAGETYP
+    - OBSTYPE
+    quality:
+    - IMGQS
+  defaults:
+    gain: 1.04
+    readnoise: 9.0
+    pixel_scale: 0.36
+    saturation_adu: 55000
+  filters:
+    B: B
+    V: V
+    R: R
+    I: I
+    U: U
+    SDSS u: u
+    SDSS g: g
+    SDSS r: r
+    SDSS i: i
+    SDSS z: z
+    u: u
+    g: g
+    r: r
+    i: i
+    z: z
+    Clear: C
+    None: C
+  systems:
+    U: vega
+    B: vega
+    V: vega
+    R: vega
+    I: vega
+    u: ab
+    g: ab
+    r: ab
+    i: ab
+    z: ab
+instrument_configs:
+  MEIA2:
+    name: TJO/MEIA2
+    telescope: TJO
+    site: OAdM
+    header:
+      mjd:
+      - MJD-OBS
+      jd:
+      - JD
+      dateobs:
+      - DATE-OBS
+      timeobs:
+      - TIME-OBS
+      exptime:
+      - EXPTIME
+      filter:
+      - FILTER
+      object:
+      - OBJECT
+      - TARGET
+      gain:
+      - GAIN
+      readnoise:
+      - RDNOISE
+      target_ra:
+      - OBJRA
+      - RA
+      target_dec:
+      - OBJDEC
+      - DEC
+      binning_x:
+      - XFACTOR
+      binning_y:
+      - YFACTOR
+      airmass:
+      - AIRMASS
+      imagetype:
+      - IMAGETYP
+      - OBSTYPE
+      quality:
+      - IMGQS
+    defaults:
+      gain: 1.04
+      readnoise: 9.0
+      pixel_scale: 0.36
+      saturation_adu: 55000
+    filters:
+      B: B
+      V: V
+      R: R
+      I: I
+      U: U
+      SDSS u: u
+      SDSS g: g
+      SDSS r: r
+      SDSS i: i
+      SDSS z: z
+      u: u
+      g: g
+      r: r
+      i: i
+      z: z
+      Clear: C
+      None: C
+    systems:
+      U: vega
+      B: vega
+      V: vega
+      R: vega
+      I: vega
+      u: ab
+      g: ab
+      r: ab
+      i: ab
+      z: ab
+  MEIA3:
+    name: TJO/MEIA3
+    telescope: TJO
+    site: OAdM
+    header:
+      mjd:
+      - MJD-OBS
+      jd:
+      - JD
+      dateobs:
+      - DATE-OBS
+      timeobs:
+      - TIME-OBS
+      exptime:
+      - EXPTIME
+      filter:
+      - FILTER
+      object:
+      - OBJECT
+      - TARGET
+      gain:
+      - GAIN
+      readnoise:
+      - RDNOISE
+      target_ra:
+      - OBJRA
+      - RA
+      target_dec:
+      - OBJDEC
+      - DEC
+      binning_x:
+      - XFACTOR
+      binning_y:
+      - YFACTOR
+      airmass:
+      - AIRMASS
+      imagetype:
+      - IMAGETYP
+      - OBSTYPE
+      quality:
+      - IMGQS
+    defaults:
+      gain: 1.94
+      readnoise: 8.3
+      pixel_scale: 0.402
+      saturation_adu: 50000
+      trim:
+        x:
+        - 494
+        - 494
+        y:
+        - 506
+        - 506
+    filters:
+      B: B
+      V: V
+      R: R
+      I: I
+      U: U
+      SDSS u: u
+      SDSS g: g
+      SDSS r: r
+      SDSS i: i
+      SDSS z: z
+      u: u
+      g: g
+      r: r
+      i: i
+      z: z
+      Clear: C
+      None: C
+    systems:
+      U: vega
+      B: vega
+      V: vega
+      R: vega
+      I: vega
+      u: ab
+      g: ab
+      r: ab
+      i: ab
+      z: ab

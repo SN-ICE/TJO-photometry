@@ -68,6 +68,12 @@ image:
   # null means 'whatever this frame's instrument file says' -- MEIA2 and MEIA3
   # have different full wells. Set a number here to override both.
   saturation_adu: null
+  # Top of the linear range, as a fraction of saturation. A CCD flattens well
+  # before it clips: pixels at or above this are masked so the PSF is fitted on
+  # the wings instead of a compressed core. Override per instrument with
+  # `nonlinear_adu` when the turnover has actually been measured.
+  nonlinear_frac: 0.87
+  nonlinear_adu: null
   # Ignore this border when detecting and calibrating. In arcsec so it means
   # the same patch of sky at any binning; edge_margin_px still works if set.
   edge_margin_arcsec: 9.0

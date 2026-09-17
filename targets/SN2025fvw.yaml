@@ -1,0 +1,6 @@
+# SN2025fvw -- written by 'tjophot resolve'.
+target:
+  name: SN2025fvw
+  # position resolved from TNS on 2026-09-10 (object_type=SN Ia, redshift=0.0061, hostname=NGC5957)
+  ra: 233.8574308
+  dec: 12.0577223

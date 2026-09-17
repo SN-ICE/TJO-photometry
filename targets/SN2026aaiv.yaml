@@ -1,0 +1,6 @@
+# SN2026aaiv -- written by 'tjophot resolve'.
+target:
+  name: SN2026aaiv
+  # position resolved from TNS on 2026-09-17 (object_type=SN Ia, redshift=0.003, hostname=NGC7331)
+  ra: 339.2734487
+  dec: 34.4097750

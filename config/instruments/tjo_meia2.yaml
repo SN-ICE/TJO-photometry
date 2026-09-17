@@ -26,6 +26,10 @@ defaults:
   readnoise: 9.0
   pixel_scale: 0.36            # arcsec/px, unbinned; only used if WCS is absent
   saturation_adu: 55000
+  # Measured on SN2026aaiv: point-source cores go flat between 50000 and 54000
+  # ADU while genuinely clipped stars sit near 64000, so the useful range ends
+  # well below `saturation_adu`.
+  nonlinear_adu: 48000
 
 # FILTER header value -> canonical band name
 filters:
