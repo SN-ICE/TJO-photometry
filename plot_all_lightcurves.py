@@ -189,7 +189,7 @@ def main(argv=None) -> int:
                 yl = y.copy()
                 if args.gap_days > 0:
                     yl[np.flatnonzero(np.diff(x) > args.gap_days)] = np.nan
-                ax.plot(x, yl, ls="--", lw=0.7, color=JOIN, alpha=0.75, zorder=2)
+                ax.plot(x, yl, ls="--", lw=1.4, color=JOIN, alpha=0.85, zorder=2)
 
             if args.errorbars:
                 ax.errorbar(x, y, yerr=arr[:, 2], fmt="none", ecolor=colour,
@@ -210,7 +210,7 @@ def main(argv=None) -> int:
 
         # Marker plus dashed line, exactly as the panel draws them.
         ax.legend(handles=[Line2D([], [], marker=marker, ms=7, mfc=colour,
-                                  mec="black", mew=0.5, ls="--", lw=0.8,
+                                  mec="black", mew=0.5, ls="--", lw=1.4,
                                   color=JOIN, label=f"${band}$")],
                   loc="upper left", frameon=False, handletextpad=0.4,
                   borderaxespad=0.7,
