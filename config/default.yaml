@@ -68,6 +68,9 @@ image:
   # null means 'whatever this frame's instrument file says' -- MEIA2 and MEIA3
   # have different full wells. Set a number here to override both.
   saturation_adu: null
+  # Software rebinning on load. null = the instrument file's own 'rebin'
+  # setting. 1 turns it off.
+  rebin: null
   # Top of the linear range, as a fraction of saturation. A CCD flattens well
   # before it clips: pixels at or above this are masked so the PSF is fitted on
   # the wings instead of a compressed core. Override per instrument with
@@ -208,6 +211,15 @@ calibration:
   max_cat_err:
     default: 0.05
     apass: 0.12
+  # A catalogue entry with no quoted error is kept by default, because several
+  # providers quote none at all and dropping them would empty the catalogue on a
+  # sparse field. Set this true where the provider always quotes one (Gaia GSPC,
+  # where a missing error means the synthetic flux was non-positive).
+  require_cat_err: false
+  # Gaia synthetic photometry carries a per-band quality flag; non-zero means
+  # Gaia does not trust that synthetic magnitude. null = do not filter on it,
+  # 0 = keep only unflagged entries (costs stars on sparse fields).
+  max_gaia_synth_flag: null
   mag_range: [11.0, 19.0]
   sigma_clip: 3.0
   color_term: fit              # fit | fixed | none
@@ -240,6 +252,7 @@ subtraction:
   template_dir: ~/Desktop/TJO/templates
   template_glob: ["*.fits", "*.fit", "*.fits.gz", "*.fits.fz"]
   reference_sources:
+    u: [file, hips, tjo_stack]
     B: [file, hips, tjo_stack]
     V: [file, hips, tjo_stack]
     R: [file, panstarrs, hips, tjo_stack]
@@ -268,11 +281,18 @@ subtraction:
   # mismatch. 'tjophot fetch-template --compare' measures which wins on your
   # own field instead of guessing.
   hips:
+    u: {survey: sdss9-u}         # SDSS footprint only; elsewhere it finds nothing
     B: {survey: dss2-blue}
     V: {survey: dss2-red}
     R: {survey: dss2-red}
     I: {survey: dss2-nir}
   hips_max_pixels: 4000
+  # Downloaded templates are cached in <cache_root>/templates under their centre.
+  # A cached cutout of the same band is reused for a target position up to this
+  # far from that centre (a TNS position replacing a first guess, a refined
+  # centroid). 'auto' = 80 per cent of the margin the cutout has around the
+  # science stamp; 0 or off = exact position only.
+  reuse_cached_within_arcsec: auto
   panstarrs:
     size_arcmin: null          # cutout to request; default is 1.25 x cutout_arcmin
     max_size_px: 3200          # PS1 pixels are 0.25", so this caps a request at ~13'
@@ -304,8 +324,43 @@ subtraction:
   # factor of this away has not found a different scaling, it has failed to
   # find one, and its flux means nothing.
   check_kernel_sum: true
-  kernel_sum_nsigma: 5.0       # robust sigma, in log10(kernel sum), within a band
-  kernel_sum_floor_dex: 0.35   # never tighter than this, however tight the band is
+  kernel_sum_nsigma: 5.0       # robust sigma, in log10(kernel sum), within a band (no longer read; superseded by kernel_sum_tolerance)
+  kernel_sum_floor_dex: 0.35   # never tighter than this, however tight the band is (no longer read; superseded by kernel_sum_warn_fraction / kernel_sum_min_images)
+  kernel_sum_tolerance: 3.0
+  # Frames a band needs before the median it is compared against means anything.
+  # Below this the check is skipped -- and says so, rather than passing silently.
+  kernel_sum_min_images: 5
+  # Report (never flag) when the normalised kernel sums of a band scatter by
+  # more than this, measured as the 16-84 percentile range over the median so
+  # that it does not grow with the number of frames. The tolerance above catches
+  # a collapsed solve; this catches the few-per-cent wobble that still costs a
+  # tenth of a magnitude when the host inside the aperture is a few times the
+  # transient. Healthy data on this archive sits at 1.9-3.1 per cent; the
+  # SN 2026abwp r band that scattered 0.21 mag read 8.6. 0 turns it off.
+  kernel_sum_warn_fraction: 0.06
+  # Re-register the reference image on the same astrometric catalogue as the
+  # science frames before differencing: shift | linear | off. The PS1 stack
+  # cutout for SN 2026abgb sat 0.26" off Gaia while every TJO frame was within
+  # 0.04" of it.
+  register_reference: shift
+  # Host-subtraction error. The science aperture is laid down at sites near the
+  # transient where the matched reference has a similar surface brightness;
+  # the scatter of the difference flux there (less the noise those apertures
+  # would show anyway) is added to the transient's error. Zero on a faint host.
+  host_residual:
+    enabled: true
+    sb_range: [0.5, 2.0]       # x the host surface brightness at the transient
+    radius_fwhm: 15.0          # how far from the transient to look
+    avoid_fwhm: 3.0            # keep clear of the transient itself
+    min_sites: 8
+    # Fraction of the measured scatter added (in quadrature) to mag_err. The
+    # sites sample knots and dust lanes that subtract worse than the transient's
+    # own position, and 10-30 sites give a noisy scatter, so the full value
+    # overstates the error: on SN 2026abgb (20 frames, g and r) 1.0 gave
+    # same-night reduced chi2 0.06-0.11, 0.5 gave 0.2-0.4 and pair differences
+    # of 0.6-1.1 sigma, 0.25 gave 0.6-1.5. 0 keeps it as a diagnostic only
+    # (column diff_host_residual always holds the full, unscaled value).
+    error_scale: 0.5
   # The chi2 above is measured on the bright stars the kernel was fitted to, so
   # it reports that the PSF match worked there -- not that the subtraction is
   # clean on the host. This judges the shape of what is left behind instead. A
@@ -331,16 +386,42 @@ subtraction:
     gauss_sigmas_px: [0.7, 1.5, 3.0]
     gauss_degrees: [4, 2, 0]   # polynomial modifier degree per Gaussian
     half_size_px: 9            # kernel half-width
+    # The pixel sizes here were tuned for a ~5 px FWHM. With scale_with_fwhm
+    # the kernel, its Gaussians and the fitting stamps grow in proportion on
+    # frames with a wider PSF in pixels (bad seeing, or rebin switched off).
+    scale_with_fwhm: true
+    tuned_fwhm_px: 5.0
     spatial_order: 0           # 0 = spatially constant kernel over the stamp
     background_order: 1        # differential background polynomial order
     n_stamps: 40               # bright stars used to solve for the kernel
     stamp_half_px: 20
+    exclude_target_fwhm: 2.0   # target pixels within this x FWHM never enter the kernel fit
     sigma_clip: 3.0
     max_iter: 3
 
 # ------------------------------- outputs -----------------------------------
 output:
+  # Pick up where the last run left off: frames already in the photometry table
+  # are left alone and only new ones are measured, so a night of new images
+  # costs a night of work instead of the whole campaign. A frame the observatory
+  # has re-reduced since that table was written is measured again. Turn it off
+  # here, or once with --no-resume; 'tjophot clean' (or --clean) removes the
+  # outputs so there is nothing to resume from, which is what to use after
+  # changing anything the existing rows were measured with.
+  resume: true
   primary_method: auto         # auto | difference_psf | psf | aperture
+  # Signal-to-noise at which a measurement becomes a detection rather than an
+  # upper limit. Read by the main path and by the zero-point transfer, which
+  # each used to carry their own hard-coded 3.0.
+  detection_snr: 3.0
+  # When every difference measurement of an epoch is flagged and the fallback
+  # would be direct photometry, keep the (flagged) difference instead if the
+  # direct value is brighter than it by more than this: 0.2 mag means the host
+  # supplies 17 per cent of the direct flux, already worse than a difference
+  # that only failed the dipole test. (0.75 let two 2026abgb r epochs through
+  # 0.6-0.7 mag too bright.) Only differences whose kernel solved qualify.
+  # null switches this off.
+  host_guard_mag: 0.2
   write_diagnostics: true
   write_qa_plots: true
   write_stamps: true
