@@ -3,8 +3,8 @@
     tjophot run SN2026acd --data-root ~/Desktop/TJO/finalfiles
     tjophot run SN2026acd --bands g r --no-subtraction
     tjophot list SN2026acd
-    tjophot fetch-catalog SN2026acd          # pre-download reference catalogues
-    tjophot colorterms SN2026acd             # instrument colour terms from many frames
+    tjophot fetch-catalog SN2026acd         # pre-download reference catalogues
+    tjophot colorterms SN2026acd            # instrument colour terms from many frames
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import Config, PIPELINE_ROOT
-from .utils import get_logger, setup_logging
+from .config import Config
+from .utils import UserError, get_logger, setup_logging
 
 log = get_logger("tjophot.cli")
 
@@ -70,7 +70,8 @@ def cmd_run(args) -> int:
     setup_logging(args.log_level, logfile=outdir / "run.log")
     result = pipeline.run(cfg, args.target, bands=args.bands, max_images=args.max_images,
                           refresh=args.refresh, skip_subtraction=args.no_subtraction,
-                          append=args.append, skip=args.skip)
+                          append=args.append, skip=args.skip,
+                          resume=not getattr(args, "no_resume", False))
     print(f"outputs in {result['outdir']}")
     return 0
 
@@ -227,7 +228,9 @@ def cmd_recalibrate(args) -> int:
         shutil.copy2(table, backup)
         print(f"\nkept the original as {backup.name}")
 
-    frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")))
+    from .pipeline import _host_guard
+    frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")),
+                                _host_guard(cfg))
     frame.to_csv(table, index=False, float_format="%.6f")
     slim_path = outdir / f"{args.target}_lightcurve.csv"
     primary = frame[frame["primary"].astype(bool)]
@@ -320,8 +323,13 @@ def cmd_resolve(args) -> int:
     found = nameresolve.resolve(args.target, cfg, sources=sources)
     if found is None:
         print(f"could not resolve {args.target}")
-        print("TNS needs a bot key: set tns.api_key / tns.bot_id / tns.bot_name in a "
-              "config file, or export TNS_API_KEY / TNS_BOT_ID / TNS_BOT_NAME.")
+        if nameresolve._tns_credentials(cfg) is None:
+            print("TNS needs a bot key: put tns.api_key / tns.bot_id / tns.bot_name in "
+                  "config/tns.yaml (see config/tns.yaml.example), or export "
+                  "TNS_API_KEY / TNS_BOT_ID / TNS_BOT_NAME.")
+        else:
+            print("TNS credentials were found (config/tns.yaml); the warning above says "
+                  "why the lookup failed.")
         return 1
 
     print(found.describe())
@@ -425,8 +433,7 @@ def cmd_fetch_template(args) -> int:
 
         reference = tpl.get_reference(stub, cfg, cache_root, coord, [], args.target,
                                       refresh=args.refresh,
-                                      stamp_arcmin=_stamp_for(cfg, index, band),
-                                      instrument=instrument)
+                                      stamp_arcmin=_stamp_for(cfg, index, band))
         if reference is None:
             print(f"{band:>3}: no reference available")
             continue
@@ -475,7 +482,7 @@ def _template_preview(reference, coord, path: Path, science=None,
 
     Everything is put on one common North-up, East-left frame centred on the
     target, so the panels can be compared with each other and with any finder
-    chart directly. TJO's own WCS has both CD diagonal terms negative, which
+    chart directly. A camera WCS can have both CD diagonal terms negative, which
     puts North *down* in the raw frames; drawing them as stored made the two
     panels mirror images of one another.
     """
@@ -857,10 +864,17 @@ def main(argv=None) -> int:
     run_parser = sub.add_parser("run", help="measure a light curve")
     _add_common(run_parser)
     run_parser.add_argument("--clean", action="store_true",
-                            help="delete this target's previous outputs before starting")
+                            help="delete this target's previous outputs and measure "
+                                 "everything from scratch. Use after changing the "
+                                 "configuration, which the existing rows were not "
+                                 "measured with")
+    run_parser.add_argument("--no-resume", action="store_true",
+                            help="measure every frame again, even ones an earlier run "
+                                 "already did, and merge the results. Without this a run "
+                                 "only measures what is new")
     run_parser.add_argument("--max-images", type=int, default=None)
     run_parser.add_argument("--skip", type=int, default=0,
-                            help="skip the first N epochs (resume a long run with --append)")
+                            help="ignore the first N epochs entirely")
     run_parser.add_argument("--no-subtraction", action="store_true",
                             help="skip difference imaging")
     run_parser.add_argument("--no-astrometry", action="store_true",
@@ -962,8 +976,12 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
-    except (RuntimeError, FileNotFoundError, KeyError) as exc:
+    except (UserError, FileNotFoundError) as exc:
         # Expected: the data or the configuration is not what was asked for.
+        # Deliberately NOT bare RuntimeError/KeyError -- those are also what a
+        # programming mistake raises (build_error_map called before
+        # estimate_background, a degenerate kernel solve), and catching them
+        # here reported a bug as a data problem and swallowed its traceback.
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except Exception:

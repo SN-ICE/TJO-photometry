@@ -11,6 +11,19 @@ from typing import Iterable, Optional, Sequence
 
 import numpy as np
 
+class UserError(Exception):
+    """The data or the configuration is not what was asked for.
+
+    Distinct from every other exception, which means tjophot itself broke. The
+    CLI maps this to exit 1 with a one-line message and everything else to exit
+    2 with a traceback; raising a bare RuntimeError for a user-facing problem
+    (as several call sites used to) made a genuine bug look like a data problem
+    and hid its traceback.
+    """
+
+
+log = logging.getLogger("tjophot.utils")
+
 LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)-18s %(message)s"
 DATE_FORMAT = "%H:%M:%S"
 
@@ -132,6 +145,57 @@ def slugify(text: str) -> str:
     return text.strip("_")
 
 
+def header_mjd(header, hmap: Optional[dict] = None) -> float:
+    """Modified Julian Date of an exposure, from whichever card carries it.
+
+    ``MJD-OBS`` first, then ``JD``, then ``DATE-OBS`` -- which the instrument
+    files already map as ``dateobs`` and nothing read. Two TTT3 frames of
+    2026-09-14 carry only that card, and they came through with a NaN MJD: they
+    sort to the end of the campaign, their observing night is meaningless, and
+    the epoch reaches the light curve with no date on it.
+    """
+    hmap = hmap or {}
+    value = first_header_value(header, hmap.get("mjd", ["MJD-OBS"]))
+    if value is not None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            pass
+    jd = first_header_value(header, hmap.get("jd", ["JD-OBS", "JD"]))
+    if jd is not None:
+        try:
+            return float(jd) - 2400000.5
+        except (TypeError, ValueError):
+            pass
+    date = first_header_value(header, hmap.get("dateobs", ["DATE-OBS", "DATE"]))
+    if date:
+        try:
+            from astropy.time import Time
+            return float(Time(str(date).strip(), scale="utc").mjd)
+        except Exception as exc:
+            log.debug("could not read a date from %r: %s", date, exc)
+    return float("nan")
+
+
+def edge_margin_px(cfg, pixel_scale: float) -> int:
+    """Border to ignore, in pixels of the frame being measured.
+
+    Configured in arcsec (``image.edge_margin_arcsec``) so it means the same
+    patch of sky whatever the binning: 24 px is 9 arcsec unbinned but 17 binned
+    2x2, and on a 1024-pixel frame that fixed margin eats 9 per cent of the
+    field instead of 2. ``image.edge_margin_px`` still overrides it.
+
+    Every consumer goes through here. Three of them used to carry their own
+    hard-coded 24 px default, which happened to agree with the arcsec setting at
+    the default rebinning and disagreed by a factor of two with ``rebin: 1``.
+    """
+    arcsec = cfg.get("image.edge_margin_arcsec")
+    if arcsec:
+        scale = float(pixel_scale) or 1.0
+        return max(int(round(float(arcsec) / scale)), 0)
+    return int(cfg.get("image.edge_margin_px", 0) or 0)
+
+
 def robust_sigma(values: np.ndarray) -> float:
     """Normalised median absolute deviation, NaN-safe."""
     values = np.asarray(values, dtype=float)
@@ -188,3 +252,42 @@ def odd(n: int) -> int:
     if n % 2 == 0:
         n += 1
     return max(3, n)
+
+
+# TNS name prefixes. A transient is registered as AT and renamed SN (or TDE,
+# ...) once classified, so the same object turns up under either.
+TNS_PREFIXES = ("sn", "at", "tde", "kn", "frb", "lrn", "ilrt", "ln", "sne")
+
+
+def normalise_name(name) -> str:
+    """Comparable form of a transient name.
+
+    'SN 2026abgb', 'SN2026abgb', 'AT2026abgb', 'AT 2026abgb', '2026abgb' and
+    'sn_2026abgb' all become '2026abgb'. Anything that is not a TNS-style
+    designation is returned lower-cased with spaces, '_' and '-' removed.
+    """
+    text = re.sub(r"[\s_\-]+", "", str(name or "")).lower()
+    match = re.match(r"^(?:" + "|".join(TNS_PREFIXES) + r")?((?:19|20)\d{2}[a-z]{1,4})$", text)
+    return match.group(1) if match else text
+
+
+def find_by_designation(directory, name, suffixes=(".yaml", ".yml")):
+    """The file in *directory* for *name*, whatever prefix either one carries.
+
+    Exact name first (``SN2026abwp.yaml`` for SN2026abwp); failing that, any
+    file whose stem is the same designation (``AT2026abwp.yaml``,
+    ``2026abwp.yaml``). None if there is none; the first match, sorted, if
+    several.
+    """
+    directory = Path(directory)
+    for suffix in suffixes:
+        exact = directory / f"{name}{suffix}"
+        if exact.exists():
+            return exact
+    wanted = normalise_name(name)
+    if not wanted or not directory.is_dir():
+        return None
+    matches = sorted(p for p in directory.iterdir()
+                     if p.suffix in suffixes and normalise_name(p.stem) == wanted)
+    return matches[0] if matches else None
+

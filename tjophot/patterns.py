@@ -25,13 +25,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
 
-from .detector import Detector, apply_trim, identify
+from .detector import Detector, identify, prepare_raw
 from .utils import band_token, ensure_dir, get_logger
 
 log = get_logger("tjophot.patterns")
@@ -165,11 +165,13 @@ def build_pattern(paths: Sequence[Path], band: str, block: int = 16,
                 hdu = next((h for h in hdul if getattr(h, "data", None) is not None), hdul[0])
                 data = np.asarray(hdu.data, dtype=float)
                 head = hdu.header
-            data, head, _ = apply_trim(data, head, instrument)
+            sat = ((instrument or {}).get("defaults", {}) or {}).get("saturation_adu")
+            data, head, _ = prepare_raw(data, head, instrument,
+                                        saturation=float(sat) if sat else None)
             here = identify(head, instrument=instrument)
             if detector is None:
                 detector = here
-                binning = int(head.get("XFACTOR", 1) or 1)
+                binning = int(here.binning)
                 offset = (int(head.get("OFFSET1", 0) or 0), int(head.get("OFFSET2", 0) or 0))
         except Exception as exc:
             log.warning("cannot read %s: %s", Path(path).name, exc)
@@ -385,7 +387,7 @@ def geometry_matches(pattern: Pattern, header, shape) -> tuple[bool, str]:
     if pattern.header is None:
         return True, ""
     want_bin = int(pattern.header.get("XBINNING", 1) or 1)
-    have_bin = int(header.get("XFACTOR", want_bin) or want_bin)
+    have_bin = int(identify(header).binning or want_bin)
     if have_bin != want_bin:
         return False, f"binning {have_bin} does not match the pattern's {want_bin}"
     offsets = (int(header.get("OFFSET1", 0) or 0), int(header.get("OFFSET2", 0) or 0))

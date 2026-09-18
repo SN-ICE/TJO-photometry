@@ -1,35 +1,31 @@
 """Detector configurations: which camera, read out how.
 
-A single telescope's archive is not a single instrument. TJO's frames span at
-least three configurations:
+An archive is rarely a single instrument. TJO runs more than one telescope and
+camera, and the same camera can be read out at different binnings. A *detector
+configuration* is the tuple (instrument, array shape the pipeline works on,
+binning), and anything measured on the detector -- fringe patterns,
+illumination residuals -- is keyed by it.
 
-* MEIA2 read out as a centred 1048 x 1048 window   (6.3 arcmin, 0.361 "/px)
-* MEIA2 read out full frame, 2048 x 2048          (12.3 arcmin, 0.361 "/px)
-* MEIA3, 3108 x 3108                              (20.8 arcmin, 0.402 "/px,
-                                                   gain 1.94, read noise 8.3)
-
-Two of those differ only in how much of the same chip was digitised; the third
-is a different camera with different gain, read noise and plate scale. Both
-kinds of change matter, and they matter in the same place, so the pipeline
-treats them uniformly: a *detector configuration* is the tuple (instrument,
-stored array shape, binning), and anything measured on the detector -- fringe
-patterns, illumination residuals -- is keyed by it.
-
-That is not fussiness. A fringe pattern is fixed in detector coordinates and
-has no meaning on an array of a different size, and a windowed readout is not
-a rescaling of the full frame: it is a crop, at an origin the header does not
-record (TJO writes OFFSET1 = OFFSET2 = 0 for both). Stretching a 2048-pixel
-pattern across a 1048-pixel frame would put the ripples in the wrong place and
-add structure rather than remove it.
+This module also owns the step between the FITS file and the pixels the
+pipeline measures (:func:`prepare_raw`): an optional border trim, masking of
+known bad regions, and software rebinning. The shape that step produces is the
+shape a detector configuration records, so that indexing (headers only) and
+image loading (pixels) agree on which detector a frame belongs to.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+
+import numpy as np
 from typing import Iterable, Optional
 
-from .utils import slugify
+from .utils import first_header_value, get_logger, slugify
+
+log = get_logger("tjophot.detector")
+
+_WARNED_ASYMMETRIC: set = set()
 
 
 @dataclass(frozen=True)
@@ -43,7 +39,7 @@ class Detector:
 
     @property
     def token(self) -> str:
-        """Filesystem-safe key, e.g. ``meia2_2048x2048``, ``meia3_3108x3108_b2``."""
+        """Filesystem-safe key, e.g. ``qhy600-ttt3_1595x1064_b6``."""
         name = slugify(self.instrument).lower() or "unknown"
         token = f"{name}_{self.nx}x{self.ny}"
         if self.binning != 1:
@@ -103,15 +99,11 @@ def trim_slices(header, instrument: Optional[dict]):
 
 
 def apply_trim(data, header, instrument: Optional[dict]):
-    """Cut the unusable border off a frame, keeping the WCS valid.
+    """Cut an unusable border off a frame, keeping the WCS valid.
 
-    MEIA3 frames carry a real edge artefact: the outer ~500 px run 10 to 60 per
-    cent off the sky level while the centre is flat to under 1 per cent. MEIA2
-    has no such border -- measured flat to 1 per cent out to the corners -- so
-    the trim belongs to the instrument, not to the pipeline.
-
-    CRPIX moves with the crop. The SIP coefficients are polynomials in
-    (x - CRPIX), so they stay valid without being touched.
+    Only frames that are still the full chip are trimmed (see
+    :func:`trim_slices`). CRPIX moves with the crop; the SIP coefficients are
+    polynomials in (x - CRPIX), so they stay valid without being touched.
     """
     cut = trim_slices(header, instrument)
     if cut is None:
@@ -128,26 +120,192 @@ def apply_trim(data, header, instrument: Optional[dict]):
     return data, header, (ys, xs)
 
 
+# --------------------------------------------------------------------------
+# binning
+# --------------------------------------------------------------------------
+def _defaults(instrument: Optional[dict]) -> dict:
+    return (instrument or {}).get("defaults", {}) or {}
+
+
+def camera_binning(header, instrument: Optional[dict] = None) -> tuple[int, int]:
+    """(x, y) binning the camera applied, from the header."""
+    hmap = (instrument or {}).get("header", {}) or {}
+    bx = _int(first_header_value(header, hmap.get("binning_x", ["XBINNING", "XFACTOR"]), 1), 1)
+    by = _int(first_header_value(header, hmap.get("binning_y", ["YBINNING", "YFACTOR"]), bx), bx)
+    return max(bx, 1), max(by, 1)
+
+
+def header_pixel_scale(header, instrument: Optional[dict] = None) -> float:
+    """Pixel scale of the stored frame in arcsec, from the CD/CDELT cards if
+    present, else the instrument's unbinned scale times the camera binning."""
+    cd11, cd12 = header.get("CD1_1"), header.get("CD1_2")
+    cd21, cd22 = header.get("CD2_1"), header.get("CD2_2")
+    try:
+        if cd11 is not None and cd22 is not None:
+            det = abs(float(cd11) * float(cd22) - float(cd12 or 0.0) * float(cd21 or 0.0))
+            if det > 0:
+                return math.sqrt(det) * 3600.0
+        if header.get("CDELT1") is not None and header.get("CDELT2") is not None:
+            return math.sqrt(abs(float(header["CDELT1"]) * float(header["CDELT2"]))) * 3600.0
+    except (TypeError, ValueError):
+        pass
+    bx, by = camera_binning(header, instrument)
+    return float(_defaults(instrument).get("pixel_scale", 0.4)) * math.sqrt(bx * by)
+
+
+def rebin_factor(header, instrument: Optional[dict] = None) -> int:
+    """The software rebinning factor this frame gets on load.
+
+    ``defaults.rebin`` in the instrument file: an integer, or ``auto`` for the
+    factor that brings the pixel scale closest to ``rebin_target_arcsec``. A
+    frame that has already been rebinned (TJOREBIN in its header) gets 1.
+    """
+    if header.get("TJOREBIN") is not None:
+        return 1
+    spec = _defaults(instrument).get("rebin", 1)
+    if spec is None:
+        return 1
+    if isinstance(spec, str):
+        if spec.strip().lower() != "auto":
+            return max(_int(spec, 1), 1)
+        target = float(_defaults(instrument).get("rebin_target_arcsec", 0.35) or 0.35)
+        scale = header_pixel_scale(header, instrument)
+        if not (scale > 0):
+            return 1
+        return max(int(round(target / scale)), 1)
+    return max(_int(spec, 1), 1)
+
+
+def _rebin_array(data: np.ndarray, factor: int, saturation: Optional[float] = None) -> np.ndarray:
+    """Block-SUM by *factor*, dropping any remainder rows/columns.
+
+    Summing keeps fluxes in the camera's own ADU, so zero points stay directly
+    comparable with un-rebinned frames and with the observatory's ZP card: the
+    sky and a star's total counts are exactly what they were, only spread over
+    fewer pixels. A block with NaNs is scaled up from its finite pixels (NaN if
+    fewer than half are finite). A block containing a saturated pixel is set to
+    at least factor**2 x saturation, so the saturation mask downstream -- whose
+    threshold is scaled the same way -- still finds it rather than seeing a
+    saturated star core diluted by its neighbours.
+    """
+    ny, nx = data.shape
+    my, mx = ny // factor, nx // factor
+    blocks = data[:my * factor, :mx * factor].reshape(my, factor, mx, factor)
+    finite = np.isfinite(blocks)
+    count = finite.sum(axis=(1, 3))
+    n = factor * factor
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = np.where(finite, blocks, 0.0).sum(axis=(1, 3)) * (n / count)
+    out[count < 0.5 * n] = np.nan
+    if saturation is not None and np.isfinite(saturation):
+        peak = np.where(finite, blocks, -np.inf).max(axis=(1, 3))
+        hot = peak >= float(saturation)
+        out[hot] = np.maximum(out[hot], float(saturation) * n)
+    return out
+
+
+def _rebin_header(header, factor: int, shape):
+    """Rescale the WCS of a frame block-averaged by *factor*.
+
+    Pixel (1-based FITS) coordinates map as p' = (p - 0.5) / f + 0.5, the CD
+    matrix grows by f, and a SIP term of total order n = p + q -- a polynomial
+    in pixel offsets returning a pixel offset -- scales by f ** (n - 1). The
+    inverse (AP/BP) terms scale the same way.
+    """
+    header = header.copy()
+    f = float(factor)
+    for key in ("CRPIX1", "CRPIX2"):
+        if key in header:
+            header[key] = (float(header[key]) - 0.5) / f + 0.5
+    for key in ("CD1_1", "CD1_2", "CD2_1", "CD2_2", "CDELT1", "CDELT2"):
+        if key in header:
+            header[key] = float(header[key]) * f
+    for poly in ("A", "B", "AP", "BP"):
+        order = header.get(f"{poly}_ORDER")
+        if order is None:
+            continue
+        for p in range(int(order) + 1):
+            for q in range(int(order) + 1 - p):
+                key = f"{poly}_{p}_{q}"
+                if key in header:
+                    header[key] = float(header[key]) * f ** (p + q - 1)
+    header["NAXIS2"], header["NAXIS1"] = int(shape[0]), int(shape[1])
+    header["TJOREBIN"] = (int(factor), "software rebinning applied by tjophot (sum)")
+    return header
+
+
+def apply_bad_regions(data: np.ndarray, instrument: Optional[dict]) -> np.ndarray:
+    """Set the instrument's known-bad regions to NaN ([y0, y1, x0, x1], native px)."""
+    regions = _defaults(instrument).get("bad_regions") or []
+    if not regions:
+        return data
+    data = np.array(data, dtype=float, copy=True)
+    for region in regions:
+        try:
+            y0, y1, x0, x1 = (int(v) for v in region)
+        except (TypeError, ValueError):
+            continue
+        data[max(y0, 0):max(y1, 0), max(x0, 0):max(x1, 0)] = np.nan
+    return data
+
+
+def prepare_raw(data: np.ndarray, header, instrument: Optional[dict],
+                saturation: Optional[float] = None):
+    """FITS pixels -> the pixels the pipeline measures.
+
+    Trim, mask known bad regions, rebin. Returns ``(data, header, info)``, the
+    header updated to describe the new array (shape and WCS).
+    """
+    info: dict = {"trimmed": False, "rebin": 1}
+    if header.get("TJOREBIN") is not None:
+        return data, header, info                  # already prepared
+    data, header, cut = apply_trim(data, header, instrument)
+    info["trimmed"] = cut is not None
+    data = apply_bad_regions(data, instrument)
+    factor = rebin_factor(header, instrument)
+    if factor > 1:
+        data = _rebin_array(np.asarray(data, dtype=float), factor, saturation)
+        header = _rebin_header(header, factor, data.shape)
+        info["rebin"] = factor
+    return data, header, info
+
+
 def identify(header, instrument_map: Optional[dict] = None,
              instrument: Optional[dict] = None) -> Detector:
     """The detector configuration a FITS header describes.
 
     ``instrument_map`` optionally renames the raw INSTRUME value, for archives
-    where the same camera was written under more than one spelling.
+    where the same camera was written under more than one spelling. The shape
+    and binning reported are those of the array the pipeline works on, after
+    any trim and software rebinning; ``binning`` is the camera binning times
+    the software factor.
     """
     raw = str(header.get("INSTRUME", "") or "unknown").strip()
     if instrument_map:
         raw = str(instrument_map.get(raw, raw)).strip()
     ny = _int(header.get("NAXIS2"), 0)
     nx = _int(header.get("NAXIS1"), 0)
-    binning = _int(header.get("XFACTOR"), 1) or 1
-    # Report the geometry the pipeline will actually work on, so that indexing
-    # and image loading agree on which detector a frame belongs to.
+    bx, by = camera_binning(header, instrument)
+    if by != bx and (raw, bx, by) not in _WARNED_ASYMMETRIC:
+        # The detector token records one binning factor, so an asymmetric
+        # readout would be labelled by its x factor alone and could be merged
+        # with a different configuration in group_by_detector and in the
+        # kernel-sum grouping. No TJO frame has done this yet; say so if one does.
+        _WARNED_ASYMMETRIC.add((raw, bx, by))
+        log.warning("%s is binned %dx%d; the detector key records only %d, so two "
+                    "readouts could be grouped together. Check the pixel scale and "
+                    "the gain for these frames.", raw or "this camera", bx, by, bx)
+    already = _int(header.get("TJOREBIN"), 0)
+    if already:
+        return Detector(instrument=raw or "unknown", ny=ny, nx=nx, binning=bx * already)
     cut = trim_slices(header, instrument)
     if cut is not None:
         ys, xs = cut
         ny, nx = ys.stop - ys.start, xs.stop - xs.start
-    return Detector(instrument=raw or "unknown", ny=ny, nx=nx, binning=binning)
+    factor = rebin_factor(header, instrument)
+    if factor > 1:
+        ny, nx = ny // factor, nx // factor
+    return Detector(instrument=raw or "unknown", ny=ny, nx=nx, binning=bx * factor)
 
 
 def group_by_detector(entries: Iterable, header_of) -> dict:
@@ -178,8 +336,8 @@ def resolve_size(value, frame_arcmin: float, fraction: float = 1.0,
                  rounding: str = "up") -> float:
     """Read a config field that may be a number or the word ``auto``.
 
-    A fixed arcmin figure is right only for one field of view. TJO's three
-    readouts span 6.3 to 20.8 arcmin, so a catalogue radius tuned for the
+    A fixed arcmin figure is right only for one field of view. Readouts and
+    cameras can span a factor of three in field, so a catalogue radius tuned for the
     middle one fetches four times too much sky for the smallest and misses
     half the field of the largest. ``auto`` scales the figure to the frame
     actually being measured; an explicit number still wins, so a value that
@@ -189,7 +347,12 @@ def resolve_size(value, frame_arcmin: float, fraction: float = 1.0,
         return float(default)
     if isinstance(value, str):
         if value.strip().lower() not in ("auto", "frame"):
-            return float(value)
+            try:
+                return float(value)
+            except ValueError:
+                log.warning("%r is neither a number nor 'auto'; using %.1f",
+                            value, float(default))
+                return float(default)
         size = float(frame_arcmin) * float(fraction)
         # Downloads are cached under a key that includes the size, so a size
         # that drifts with every frame would mean a fresh download per frame.
@@ -223,8 +386,8 @@ def stamp_arcmin(cfg, image=None, detector: Optional[Detector] = None,
     """Working stamp size around the target, honouring ``auto``.
 
     Three quarters of the frame keeps a margin for the reprojection edges and
-    for dithering, and the clamp stops a 6 arcmin subframe asking for a stamp
-    wider than itself or a 21 arcmin frame dragging down a huge template.
+    for dithering, and the clamp stops a small subframe asking for a stamp
+    wider than itself or a wide frame dragging down a huge template.
     """
     return resolve_size(cfg.get("subtraction.cutout_arcmin", "auto"),
                         frame_arcmin(image, detector, pixel_scale),

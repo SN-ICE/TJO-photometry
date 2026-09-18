@@ -88,28 +88,18 @@ def _polynomial_terms(shape, order: int) -> list[np.ndarray]:
 
 
 # --------------------------------------------------------------------------
-def _select_stamps(science: np.ndarray, mask: np.ndarray, fwhm_px: float,
-                   n_stamps: int, half: int) -> list[tuple[int, int]]:
-    """Positions of bright, isolated, unsaturated sources to fit the kernel on."""
-    from photutils.detection import DAOStarFinder
+# At most this many candidates are examined per threshold. The list is sorted
+# brightest first and the good ones are taken from the top, so the tail is only
+# ever reached on a field where almost everything is being rejected.
+_MAX_CANDIDATES = 600
 
-    _, median, std = sigma_clipped_stats(science, mask=mask, sigma=3.0)
-    found = None
-    for threshold in (30.0, 15.0, 8.0, 5.0):
-        finder = DAOStarFinder(fwhm=max(fwhm_px, 1.5), threshold=threshold * std,
-                               exclude_border=True)
-        candidates = finder(science - median, mask=mask)
-        if candidates is not None and len(candidates) >= min(n_stamps, 12):
-            found = candidates
-            break
-        if candidates is not None and (found is None or len(candidates) > len(found)):
-            found = candidates
-    if found is None or len(found) == 0:
-        return []
 
-    found = found[np.argsort(-np.asarray(found["flux"]))]
+def _accept_stamps(found, science: np.ndarray, mask: np.ndarray, n_stamps: int,
+                   half: int, peak_limit: float, avoid_xy=None,
+                   avoid_radius: float = 0.0) -> list[tuple[int, int]]:
+    """The cuts a candidate has to survive to become a kernel stamp."""
+    found = found[np.argsort(-np.asarray(found["flux"]))][:_MAX_CANDIDATES]
     ny, nx = science.shape
-    peak_limit = np.nanpercentile(science, 99.999)
     picks: list[tuple[int, int]] = []
     for row in found:
         x, y = int(round(float(row["xcentroid"]))), int(round(float(row["ycentroid"])))
@@ -119,6 +109,9 @@ def _select_stamps(science: np.ndarray, mask: np.ndarray, fwhm_px: float,
             continue
         if float(row["peak"]) > 0.9 * peak_limit:
             continue
+        if avoid_xy is not None and np.hypot(float(row["xcentroid"]) - avoid_xy[0],
+                                             float(row["ycentroid"]) - avoid_xy[1]) < avoid_radius:
+            continue                        # the transient itself, or a knot right on it
         if any(abs(x - px) < half and abs(y - py) < half for px, py in picks):
             continue
         if np.nanmax(science[y - half:y + half + 1, x - half:x + half + 1]) <= 0:
@@ -129,16 +122,76 @@ def _select_stamps(science: np.ndarray, mask: np.ndarray, fwhm_px: float,
     return picks
 
 
+def _select_stamps(science: np.ndarray, mask: np.ndarray, fwhm_px: float,
+                   n_stamps: int, half: int, avoid_xy=None,
+                   avoid_radius: float = 0.0) -> list[tuple[int, int]]:
+    """Positions of bright, isolated, unsaturated sources to fit the kernel on.
+
+    The detection threshold is lowered until there are enough stamps that
+    *survive the cuts*, not until there are enough candidates. Counting
+    candidates was measurably wrong: the ladder stopped as soon as a rung
+    returned twelve of them, whatever ``n_stamps`` asked for, and then four to
+    eight of those twelve were thrown away for having a masked pixel -- a
+    saturation halo, a cosmic ray -- inside the stamp box. On the sparse
+    SN 2026abwp field 30 sigma gave 15-17 candidates and 7-10 stamps against the
+    40 requested, while 5 sigma had 47-60 candidates waiting one rung below.
+
+    That matters more than it sounds. The kernel's overall flux scale is what
+    sets how much reference is subtracted, the host there is 2.6-4.5 times the
+    transient inside the aperture, and so a few per cent of scatter in the
+    kernel sum becomes a tenth of a magnitude in the light curve: two r frames
+    nine minutes apart came out 0.21 mag (5.4 sigma) apart, of which the
+    kernel-sum difference alone accounted for 95 per cent.
+
+    Candidates are taken brightest first, so a deeper threshold can only add
+    fainter stars after the bright ones have been used -- it never displaces a
+    good stamp with a worse one.
+    """
+    from photutils.detection import DAOStarFinder
+
+    _, median, std = sigma_clipped_stats(science, mask=mask, sigma=3.0)
+    # A stamp with nothing unmasked left in it gives a masked std, which
+    # DAOStarFinder rejects from deep inside photutils with a message about
+    # quantities. Say the useful thing here instead and let the caller's
+    # "too few pixels to solve for the kernel" be what the log shows.
+    if not np.isfinite(std) or std <= 0:
+        return []
+
+    peak_limit = float(np.nanpercentile(science, 99.999))
+    best: list[tuple[int, int]] = []
+    for threshold in (30.0, 15.0, 8.0, 5.0, 3.0):
+        try:
+            candidates = DAOStarFinder(fwhm=max(fwhm_px, 1.5), threshold=threshold * std,
+                                       exclude_border=True)(science - median, mask=mask)
+        except Exception:
+            break
+        if candidates is None or len(candidates) == 0:
+            continue
+        picks = _accept_stamps(candidates, science, mask, n_stamps, half,
+                               peak_limit, avoid_xy, avoid_radius)
+        if len(picks) > len(best):
+            best = picks
+        if len(best) >= n_stamps:
+            break
+    if len(best) < n_stamps:
+        log.debug("only %d of the %d requested kernel stamps survived the cuts",
+                  len(best), n_stamps)
+    return best
+
+
 def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
-                 fwhm_px: float, cfg) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+                 fwhm_px: float, cfg,
+                 exclude_xy: Optional[tuple] = None) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """Least-squares PSF matching taking *reference* into *science*.
 
     The kernel may vary over the stamp: each basis function is multiplied by a
     2D polynomial of order ``subtraction.kernel.spatial_order`` (0 = constant).
 
-    Returns ``(model, kernel_centre, background, info)`` where *model* is the
-    matched reference (background included) and *kernel_centre* is the kernel
-    evaluated at the centre of the stamp, used for noise propagation and QA.
+    Returns ``(model, kernel_centre, info)`` where *model* is the matched
+    reference (the differential-background polynomial included) and
+    *kernel_centre* is the kernel evaluated at the centre of the stamp, used for
+    noise propagation and QA. The background term used to be returned separately
+    as a fourth, full-frame array that no caller ever looked at.
     """
     half = int(cfg.get("subtraction.kernel.half_size_px", 9))
     sigmas = list(cfg.get("subtraction.kernel.gauss_sigmas_px", [0.7, 1.5, 3.0]))
@@ -150,21 +203,53 @@ def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
     nsigma = float(cfg.get("subtraction.kernel.sigma_clip", 3.0))
     max_iter = int(cfg.get("subtraction.kernel.max_iter", 3))
 
+    # The pixel sizes above were tuned on frames with a ~5 px FWHM. A kernel
+    # must be wide enough to carry the seeing difference, and the stamps wide
+    # enough to hold a star, so on coarser-sampled frames everything grows in
+    # proportion. Never shrinks: below the tuning FWHM the defaults stand.
+    if bool(cfg.get("subtraction.kernel.scale_with_fwhm", True)):
+        tuned = float(cfg.get("subtraction.kernel.tuned_fwhm_px", 5.0) or 5.0)
+        grow = max(float(fwhm_px) / tuned, 1.0) if np.isfinite(fwhm_px) else 1.0
+        if grow > 1.0:
+            half = int(np.ceil(half * grow))
+            sigmas = [float(v) * grow for v in sigmas]
+            stamp_half = int(np.ceil(stamp_half * grow))
+            log.debug("kernel scaled x%.2f for a %.1f px FWHM (half-size %d px)",
+                      grow, fwhm_px, half)
+
     basis = gaussian_basis(half, sigmas, degrees)
     spatial = _polynomial_terms(science.shape, spatial_order)
     bkg_terms = _polynomial_terms(science.shape, bkg_order)
+    n_kernel_columns = len(basis) * len(spatial)
+    n_columns = n_kernel_columns + len(bkg_terms)
+    # With a spatially constant kernel the single spatial term is all ones, so
+    # multiplying by it only makes a copy.
+    unit_spatial = spatial_order == 0 and len(spatial) == 1
 
     ref = np.nan_to_num(reference, nan=0.0, posinf=0.0, neginf=0.0)
-    convolved = [fftconvolve(ref, b, mode="same") for b in basis]
 
-    columns: list[np.ndarray] = []
-    for conv in convolved:
-        for poly in spatial:
-            columns.append(conv * poly)
-    n_kernel_columns = len(columns)
-    columns.extend(bkg_terms)
-
-    picks = _select_stamps(science, mask, fwhm_px, n_stamps, stamp_half)
+    # The transient must never inform the kernel. It is in the science frame and
+    # not in the reference, so a stamp on it asks the kernel to conjure its flux
+    # out of the host: the solve tilts (a kernel centroid of 0.9 px on one
+    # SN 2026abgb frame) and the matched host is over-subtracted exactly where
+    # the supernova is measured. It sits on a bright host, so the star finder
+    # happily picks it: on every 2026abgb frame a stamp landed within 1 px of
+    # it. Keep every stamp, and every fitted pixel, clear of it by a stamp's
+    # half-width plus a few FWHM.
+    exclusion = None
+    radius = 0.0
+    if exclude_xy is not None and all(np.isfinite(exclude_xy)):
+        radius = float(cfg.get("subtraction.kernel.exclude_target_fwhm", 2.0)) * float(fwhm_px)
+        yy_e, xx_e = np.mgrid[0:science.shape[0], 0:science.shape[1]]
+        exclusion = np.hypot(xx_e - float(exclude_xy[0]), yy_e - float(exclude_xy[1])) < radius
+    # Only the transient's own pixels are kept out. Rejecting every stamp that
+    # overlaps it (a disc of stamp_half + 3 FWHM) was tried and was worse: on
+    # SN 2026abgb it also threw out the host nucleus and nearby knots, and the
+    # kernel sums scattered by 5 per cent about the zero-point prediction
+    # instead of 1-2.
+    picks = _select_stamps(science, mask, fwhm_px, n_stamps, stamp_half,
+                           avoid_xy=exclude_xy if exclusion is not None else None,
+                           avoid_radius=radius)
     fit_mask = np.zeros(science.shape, dtype=bool)
     if picks:
         for x, y in picks:
@@ -174,6 +259,8 @@ def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
         fit_mask[:] = True
 
     fit_mask &= ~mask
+    if exclusion is not None:
+        fit_mask &= ~exclusion
     fit_mask &= np.isfinite(science) & np.isfinite(reference)
     # Never let the edges, where the convolution is incomplete, drive the fit.
     fit_mask[:half + 1, :] = False
@@ -181,30 +268,45 @@ def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
     fit_mask[:, :half + 1] = False
     fit_mask[:, -half - 1:] = False
 
-    if fit_mask.sum() < 10 * len(columns):
-        raise RuntimeError(f"too few pixels ({int(fit_mask.sum())}) to solve for the kernel")
+    fit_index = np.flatnonzero(fit_mask)
+    if fit_index.size < 10 * n_columns:
+        raise RuntimeError(f"too few pixels ({int(fit_index.size)}) to solve for the kernel")
 
-    keep = fit_mask.copy()
-    coefficients = np.zeros(len(columns))
+    # The design matrix holds only the pixels that are actually fitted, and it
+    # is built one basis function at a time so that at most one convolution
+    # exists at full stamp size. Keeping every column at full size instead --
+    # 22 convolutions, 22 copies of them, and a fresh model image per iteration
+    # -- cost roughly 450 MB at the default rebinning and some 4 GB with
+    # image.rebin: 1, which is more than most laptops have to spare.
+    design = np.empty((fit_index.size, n_columns), dtype=float)
+    column = 0
+    for function in basis:
+        convolved = fftconvolve(ref, function, mode="same")
+        flat = convolved.ravel()
+        for poly in spatial:
+            design[:, column] = (flat[fit_index] if unit_spatial
+                                 else (convolved * poly).ravel()[fit_index])
+            column += 1
+        del convolved, flat
+    for term in bkg_terms:
+        design[:, column] = term.ravel()[fit_index]
+        column += 1
+    observed = science.ravel()[fit_index]
+
+    keep = np.ones(fit_index.size, dtype=bool)
+    coefficients = np.zeros(n_columns)
     rms = float("nan")
     for _ in range(max_iter):
-        design = np.column_stack([c[keep] for c in columns])
-        coefficients, *_ = np.linalg.lstsq(design, science[keep], rcond=None)
-        residual = science[keep] - design @ coefficients
-        scatter = float(np.std(residual))
+        coefficients, *_ = np.linalg.lstsq(design[keep], observed[keep], rcond=None)
+        residual = observed - design @ coefficients
+        scatter = float(np.std(residual[keep]))
         rms = scatter
         if not np.isfinite(scatter) or scatter <= 0:
             break
-        model_full = sum(c * col for c, col in zip(coefficients, columns))
-        new_keep = fit_mask & (np.abs(science - model_full) < nsigma * scatter)
-        if new_keep.sum() < 10 * len(columns) or new_keep.sum() == keep.sum():
+        new_keep = np.abs(residual) < nsigma * scatter
+        if new_keep.sum() < 10 * n_columns or new_keep.sum() == keep.sum():
             break
         keep = new_keep
-
-    model = sum(c * col for c, col in zip(coefficients, columns))
-    background = sum(c * t for c, t in zip(coefficients[n_kernel_columns:], bkg_terms))
-    if np.isscalar(background):
-        background = np.full(science.shape, float(background))
 
     # Kernel at the centre of the stamp: the spatial polynomials are built so
     # that the centre pixel has P_0 = 1 and every higher term = 0.
@@ -215,17 +317,43 @@ def solve_kernel(science: np.ndarray, reference: np.ndarray, mask: np.ndarray,
         for n, b in enumerate(basis)
     )
 
-    residual = science[keep] - model[keep]
+    # The matched image, rebuilt from the coefficients rather than carried
+    # through the fit. Convolution is linear, so with a constant kernel the
+    # whole basis expansion collapses to a single convolution by that kernel.
+    model = np.zeros(science.shape, dtype=float)
+    for coefficient, term in zip(coefficients[n_kernel_columns:], bkg_terms):
+        if coefficient:
+            model += coefficient * term
+    if unit_spatial:
+        model += fftconvolve(ref, kernel_centre, mode="same")
+    else:
+        index = 0
+        for function in basis:
+            convolved = fftconvolve(ref, function, mode="same")
+            for poly in spatial:
+                coefficient = coefficients[index]
+                index += 1
+                if coefficient:
+                    model += coefficient * (convolved * poly)
+            del convolved
+
+    yk, xk = np.mgrid[:kernel_centre.shape[0], :kernel_centre.shape[1]]
+    ksum = float(kernel_centre.sum())
+    kc = kernel_centre.shape[0] // 2
     info = {
+        "kernel_dx": float(((xk - kc) * kernel_centre).sum() / ksum) if ksum else float("nan"),
+        "kernel_dy": float(((yk - kc) * kernel_centre).sum() / ksum) if ksum else float("nan"),
+        "target_excluded": exclusion is not None,
         "n_stamps": len(picks),
         "n_pixels": int(keep.sum()),
         "n_basis": len(basis),
-        "n_columns": len(columns),
+        "n_columns": n_columns,
         "spatial_order": spatial_order,
         "resid_rms": rms,
         "kernel_sum": float(kernel_centre.sum()),
+        "background_coefficients": [float(c) for c in coefficients[n_kernel_columns:]],
     }
-    return model, kernel_centre, background, info
+    return model, kernel_centre, info
 
 
 # --------------------------------------------------------------------------
@@ -313,9 +441,11 @@ def subtract(image, reference, cfg, coord: SkyCoord,
 
     work_mask = mask | ~np.isfinite(science_fit) | ~np.isfinite(reference_fit)
     try:
-        matched, kernel, background, info = solve_kernel(
+        target_xy = tuple(float(v) for v in stamp_wcs.world_to_pixel(coord))
+        matched, kernel, info = solve_kernel(
             np.nan_to_num(science_fit), np.nan_to_num(reference_fit), work_mask,
-            fwhm_px if mode == "convolve_reference" else max(ref_fwhm, fwhm_px), cfg)
+            fwhm_px if mode == "convolve_reference" else max(ref_fwhm, fwhm_px), cfg,
+            exclude_xy=target_xy)
     except Exception as exc:
         empty.message = f"kernel solution failed: {exc}"
         log.warning("%s: %s", image.meta.path.name, empty.message)

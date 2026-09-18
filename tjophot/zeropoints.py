@@ -130,32 +130,90 @@ def _combine(predictions: list, floor: float = 0.03) -> Optional[dict]:
             "partners": ",".join(p["band"] for p in predictions)}
 
 
-def _partner(band, night, per_night, offsets, min_nights, max_scatter):
-    """Kept for the single-partner case; returns the tightest option."""
-    options = _predictions(band, night, per_night, offsets, min_nights, max_scatter)
-    if not options:
-        return None
-    best = options[0]
-    return (best["band"], best["zp"] - 0.0, best["scatter"], 0.0, best["n"])
+def camera_of(frame: pd.DataFrame) -> pd.Series:
+    """The camera each row was taken with (``QHY600-TTT3``, ``iKon936-TTT3``).
+
+    Band-to-band offsets are a property of one camera's filters and detector,
+    and a zero point is a property of one camera's sensitivity: on SN 2026abgb
+    the iKon936 zero points sit 1.4 mag above the QHY600 ones in the same band
+    on the same night. Mixing cameras in one per-night median would turn the
+    offsets into noise (g-i scattered by 0.62 mag across nights that way).
+
+    Read from the ``camera`` column. Tables written before that column existed
+    fall back to the instrument part of ``detector``, which is where this used
+    to get it from -- a coupling to a label format defined in another module,
+    where a cosmetic change to ``Detector.label`` would have broken per-camera
+    transfer with no error at all.
+    """
+    if "camera" in frame.columns:
+        camera = frame["camera"].fillna("").astype(str)
+        if camera.str.strip().any():
+            return camera
+    if "detector" not in frame.columns:
+        return pd.Series("", index=frame.index)
+    return frame["detector"].fillna("").astype(str).str.split().str[0].fillna("")
 
 
 def transfer(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
              max_scatter: float = 0.25) -> tuple:
+    """Fill in missing zero points from another band of the same night and camera.
+
+    Each camera is handled on its own (see ``camera_of``). Returns (frame,
+    report); the report's offsets are keyed ``camera:a-b`` when there is more
+    than one camera.
+    """
+    cameras = camera_of(frame)
+    names = [c for c in pd.unique(cameras)]
+    if len(names) <= 1:
+        return _transfer_one(frame, cfg, min_nights, max_scatter)
+    pieces, report = [], {"offsets": {}, "recovered": [], "unrecovered": [],
+                          "approximate_offset": 0}
+    for name in names:
+        part, rep = _transfer_one(frame[cameras == name], cfg, min_nights, max_scatter,
+                                  label=name or "unknown camera")
+        pieces.append(part)
+        report["offsets"].update({f"{name}:{k}": v for k, v in rep["offsets"].items()})
+        report["recovered"] += rep["recovered"]
+        report["unrecovered"] += rep["unrecovered"]
+        report["approximate_offset"] += rep["approximate_offset"]
+    return pd.concat(pieces).loc[frame.index], report
+
+
+def _transfer_one(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
+                  max_scatter: float = 0.25, label: str = "") -> tuple:
     """Fill in missing zero points from another band of the same night.
 
     Returns (frame, report). Rows that gain a zero point are recalculated and
     flagged ``zp_transferred``; nothing that already had one is touched.
     """
     floor = 0.03
+    detection_snr = 3.0
+    limiting_sigma = 3.0
     if cfg is not None:
         min_nights = int(cfg.get("calibration.transfer_min_nights", min_nights))
         max_scatter = float(cfg.get("calibration.transfer_max_scatter", max_scatter))
         floor = float(cfg.get("calibration.transfer_error_floor", floor))
+        # The same threshold the main path uses, rather than a second hard-coded
+        # 3.0 that could drift away from it.
+        detection_snr = float(cfg.get("output.detection_snr", detection_snr))
+        limiting_sigma = float(cfg.get("calibration.limiting_sigma", limiting_sigma))
 
     frame = frame.copy()
-    for column in ("zp_source", "mag_offset"):
+    # Every column this function reads back or rewrites, so a table that is
+    # missing one gains it rather than raising. Writing cell by cell used to
+    # create them implicitly; taking a snapshot and assigning per column does
+    # not, and a hand-built or older table would have died on the difference.
+    # The fill value carries the dtype: a text or boolean column created as NaN
+    # is float64, and writing a string or a bool into it is an incompatible-dtype
+    # assignment that pandas warns about now and will refuse later.
+    ensure = {"zp_source": "", "cal_provider": "", "is_limit": False, "flags": 0,
+              "mag_offset": np.nan, "snr": np.nan, "mag": np.nan, "mag_err": np.nan,
+              "limit_mag": np.nan, "flux": np.nan, "flux_err": np.nan,
+              "flux_err_sys": np.nan, "apcor": np.nan, "sky_rms_adu": np.nan,
+              "aperture_radius_px": np.nan, "exptime": np.nan}
+    for column, fill in ensure.items():
         if column not in frame.columns:
-            frame[column] = np.nan
+            frame[column] = fill
     frame["zp_source"] = frame["zp_source"].fillna(
         pd.Series(np.where(np.isfinite(frame["zp"]), "fit", ""), index=frame.index))
 
@@ -164,7 +222,8 @@ def transfer(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
                           for (a, b), v in offsets.items()},
               "recovered": [], "unrecovered": [], "approximate_offset": 0}
     if not offsets:
-        log.info("not enough overlapping nights to measure band offsets")
+        log.info("%snot enough overlapping nights to measure band offsets",
+                 f"{label}: " if label else "")
         return frame, report
 
     known = frame.dropna(subset=["zp"]).copy()
@@ -199,8 +258,14 @@ def transfer(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
         frame.loc[index, "flags"] = (frame.loc[index, "flags"].fillna(0).astype(int)
                                      & ~lc.FLAG_NO_ZEROPOINT) | lc.FLAG_ZP_TRANSFERRED
 
-        for row_index in index:
-            row = frame.loc[row_index]
+        # One snapshot of these rows, then one assignment per column. Reading
+        # and writing them a cell at a time built a mixed-dtype Series per row
+        # and fought pandas' dtype inference on every write.
+        snapshot = frame.loc[index]
+        new = {name: list(snapshot[name]) for name in
+               ("flags", "snr", "mag", "mag_err", "is_limit", "limit_mag")}
+        for k, row_index in enumerate(index):
+            row = snapshot.loc[row_index]
             offset_mag = row.get("mag_offset", np.nan)
             if not np.isfinite(offset_mag):
                 # An older table has no record of the correction that was
@@ -211,31 +276,46 @@ def transfer(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
                     offset_mag = float(row.get("apcor", 0.0) or 0.0)
                 else:
                     offset_mag = 0.0
-                    frame.loc[row_index, "flags"] = int(frame.loc[row_index, "flags"]) \
-                        | lc.FLAG_APPROX_OFFSET
+                    new["flags"][k] = int(new["flags"][k]) | lc.FLAG_APPROX_OFFSET
                     report["approximate_offset"] += 1
 
             flux, flux_err = row.get("flux", np.nan), row.get("flux_err", np.nan)
             snr = flux / flux_err if (np.isfinite(flux_err) and flux_err > 0) else np.nan
-            frame.loc[row_index, "snr"] = snr
-            if np.isfinite(flux) and flux > 0 and np.isfinite(snr) and snr >= 3.0:
-                frame.loc[row_index, "mag"] = -2.5 * np.log10(flux) + offset_mag + zp
-                frame.loc[row_index, "mag_err"] = float(np.hypot(
-                    1.0857362 * flux_err / flux, zp_err))
-                frame.loc[row_index, "is_limit"] = False
+            new["snr"][k] = snr
+            if np.isfinite(flux) and flux > 0 and np.isfinite(snr) and snr >= detection_snr:
+                new["mag"][k] = -2.5 * np.log10(flux) + offset_mag + zp
+                sys = row.get("flux_err_sys", 0.0)
+                sys = float(sys) if sys is not None and np.isfinite(sys) else 0.0
+                new["mag_err"][k] = float(np.hypot(
+                    1.0857362 * np.hypot(flux_err, sys) / flux, zp_err))
+                new["is_limit"][k] = False
             else:
-                frame.loc[row_index, "mag"] = np.nan
-                frame.loc[row_index, "mag_err"] = np.nan
-                frame.loc[row_index, "is_limit"] = True
+                new["mag"][k] = np.nan
+                new["mag_err"][k] = np.nan
+                new["is_limit"][k] = True
 
+            # The limit is recomputed here from the analytic sky term, because
+            # the empirical and injected limits the main path uses cannot be
+            # reproduced from the table. It moves with the new zero point, which
+            # is the part that matters; the definition differs from the rest of
+            # the column and the row says so through zp_transferred.
             sky_rms = row.get("sky_rms_adu", np.nan)
             radius = row.get("aperture_radius_px", np.nan)
             exptime = row.get("exptime", np.nan)
             if np.isfinite(sky_rms) and np.isfinite(radius) and np.isfinite(exptime):
                 noise = sky_rms * np.sqrt(np.pi * radius ** 2) / max(exptime, 1e-6)
                 if noise > 0:
-                    frame.loc[row_index, "limit_mag"] = float(
-                        -2.5 * np.log10(3.0 * noise) + offset_mag + zp)
+                    new["limit_mag"][k] = float(
+                        -2.5 * np.log10(limiting_sigma * noise) + offset_mag + zp)
+
+        for name, values in new.items():
+            # is_limit is boolean and mag is not; assigning a list into a column
+            # of the wrong dtype is deprecated, so widen it once if it comes to
+            # that rather than letting pandas guess.
+            if frame[name].dtype == bool and not all(isinstance(v, (bool, np.bool_))
+                                                     for v in values):
+                frame[name] = frame[name].astype(object)
+            frame.loc[index, name] = values
 
         report["recovered"].append({"image": str(image), "band": str(band),
                                     "from": str(other), "zp": round(float(zp), 4),

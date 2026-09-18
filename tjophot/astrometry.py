@@ -1,9 +1,7 @@
 """WCS refinement.
 
-TJO frames arrive with an astrometry.net solution, which is close but not
-tight: on SN2026acd the residuals against a reference catalogue are a
-non-negligible fraction of a pixel and there is a systematic offset between the
-header pointing and the true source positions. Since every aperture, PSF fit
+Frames arrive with a header astrometric solution (TJO: TAN-SIP from the
+observatory pipeline), which is close but not necessarily tight against Gaia. Since every aperture, PSF fit
 and difference-image stamp is placed through the WCS, it is worth re-fitting it
 against the same catalogue used for the photometric calibration before anything
 else happens.
@@ -18,7 +16,6 @@ Three fit modes, in increasing freedom:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -191,21 +188,3 @@ def _fit_shift(wcs: WCS, x: np.ndarray, y: np.ndarray, ref: SkyCoord) -> WCS:
     fitted.wcs.crpix = [wcs.wcs.crpix[0] - dx, wcs.wcs.crpix[1] - dy]
     return fitted
 
-
-def internal_consistency(images, coord: SkyCoord) -> float:
-    """Scatter of one sky position's pixel coordinates across frames.
-
-    A quick way to see how consistent a set of WCS solutions is with each other
-    without any external catalogue.
-    """
-    xs, ys = [], []
-    for image in images:
-        try:
-            x, y = image.pixel_of(coord)
-            xs.append(x)
-            ys.append(y)
-        except Exception:
-            continue
-    if len(xs) < 3:
-        return float("nan")
-    return float(np.hypot(np.std(xs), np.std(ys)))

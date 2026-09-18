@@ -92,22 +92,6 @@ def _sigma_clipped_fit(x: np.ndarray, y: np.ndarray, w: np.ndarray, fit_slope: b
     return intercept, slope, intercept_err, slope_err, rms, keep
 
 
-class _Relaxed:
-    """A read-only view of the configuration with a few keys overridden."""
-
-    def __init__(self, cfg, overrides: dict):
-        self._cfg = cfg
-        self._overrides = overrides
-
-    def get(self, dotted, default=None):
-        if dotted in self._overrides:
-            return self._overrides[dotted]
-        return self._cfg.get(dotted, default)
-
-    def resolve_path(self, value):
-        return self._cfg.resolve_path(value)
-
-
 # Tried in order when the strict cuts leave too few calibration stars. Each
 # step trades catalogue precision for numbers: a zero point averaged over ten
 # stars of 0.1 mag beats one from three stars of 0.03, because the scatter
@@ -150,7 +134,7 @@ def calibrate_image(image, sources: Table, fwhm_px: float, cfg, cache_root: Path
                 # A handful of stars cannot constrain a colour term as well as
                 # a zero point, and trying makes both worse.
                 settings["calibration.color_term"] = "none"
-            view = _Relaxed(cfg, settings) if settings else cfg
+            view = cfg.overridden(settings) if settings else cfg
 
             result = _calibrate_once(image, sources, fwhm_px, view, cache_root,
                                      apcor_mag=apcor_mag, refresh=refresh)
@@ -179,13 +163,22 @@ def calibrate_image(image, sources: Table, fwhm_px: float, cfg, cache_root: Path
 
 
 def _drop_variables(table: Table, cfg, ra: float, dec: float, radius: float,
-                    cache_root: Path, refresh: bool) -> Table:
-    """Remove known variable stars from a calibration catalogue."""
+                    cache_root: Path, refresh: bool) -> tuple[Table, bool]:
+    """Remove known variable stars from a calibration catalogue.
+
+    Returns ``(table, screened)``. ``screened`` is False when the variability
+    lookup could not be made at all -- a SIMBAD outage, say. That is not the
+    same as "this field has no variables", and it used to be indistinguishable:
+    both came back as an untouched table, so a network hiccup silently put the
+    Mira back into a three-star zero point with nothing in the output to say so.
+    """
     if not bool(cfg.get("calibration.screen_variables", True)) or len(table) == 0:
-        return table
+        return table, True
     known = cat.variable_stars(ra, dec, radius, cache_root, refresh=refresh)
-    if known is None or len(known) == 0:
-        return table
+    if known is None:
+        return table, False
+    if len(known) == 0:
+        return table, True
     tol = float(cfg.get("calibration.variable_match_arcsec", 2.0))
     here = SkyCoord(np.asarray(table["ra"]) * u.deg, np.asarray(table["dec"]) * u.deg)
     there = SkyCoord(np.asarray(known["ra"]) * u.deg, np.asarray(known["dec"]) * u.deg)
@@ -195,7 +188,7 @@ def _drop_variables(table: Table, cfg, ra: float, dec: float, radius: float,
         log.info("dropped %d calibration star(s) matching a known variable "
                  "(%s)", int(hit.sum()),
                  ", ".join(sorted({str(known["otype"][i]) for i in idx[hit]})[:4]))
-    return table[~hit]
+    return table[~hit], True
 
 
 def _calibrate_once(image, sources: Table, fwhm_px: float, cfg, cache_root: Path,
@@ -281,7 +274,8 @@ def _calibrate_once(image, sources: Table, fwhm_px: float, cfg, cache_root: Path
             continue
 
         clean = cat.clean_catalog(table, band, cfg)
-        clean = _drop_variables(clean, cfg, ra0, dec0, radius, cache_root, refresh)
+        clean, screened = _drop_variables(clean, cfg, ra0, dec0, radius,
+                                          cache_root, refresh)
         if len(clean) < min_stars:
             messages.append(f"{provider}: {len(clean)} usable {band} entries")
             continue
@@ -373,7 +367,8 @@ def _calibrate_once(image, sources: Table, fwhm_px: float, cfg, cache_root: Path
                          color_pivot=pivot, n_stars=n_used, rms=float(rms),
                          provider=provider, system=image.meta.system,
                          color_name=color_name, stars=stars, ok=True,
-                         meta={"n_matched": int(matched.sum()), "n_catalog": len(clean)})
+                         meta={"n_matched": int(matched.sum()), "n_catalog": len(clean),
+                               "variables_screened": bool(screened)})
 
     fail.message = "; ".join(messages) or "no catalogue produced a usable fit"
     log.warning("%s %s: calibration failed (%s)", image.meta.path.name, band, fail.message)

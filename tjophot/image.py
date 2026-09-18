@@ -20,7 +20,7 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 import astropy.units as u
 from photutils.background import Background2D, MedianBackground
 
-from .utils import first_header_value, get_logger
+from .utils import edge_margin_px, first_header_value, get_logger, header_mjd
 
 log = get_logger("tjophot.image")
 
@@ -37,8 +37,7 @@ class ImageMeta:
     exptime: float
     gain: float                  # e-/ADU
     readnoise: float             # e-
-    saturation: float            # ADU -- hard ceiling
-    nonlinear: float             # ADU -- top of the trustworthy range
+    saturation: float            # ADU
     pixel_scale: float           # arcsec/px
     target_coord: Optional[SkyCoord] = None
     airmass: Optional[float] = None
@@ -50,40 +49,59 @@ class ImageMeta:
         return f"{self.mjd:.5f}_{self.band}"
 
 
+def effective_gain(header, hmap: dict, defaults: dict, camera_binning=(1, 1),
+                   rebin: int = 1) -> tuple[float, float, dict]:
+    """Gain (e-/ADU) and read noise (e-) of one pixel of the array being measured.
 
-def _nonlinear_level(cfg, defaults, saturation: float) -> float:
-    """Top of the range where the detector still responds linearly.
-
-    A CCD does not go from linear to clipped at one value: it turns over well
-    below the hard ceiling and flattens into a plateau. On MEIA2 the ceiling is
-    around 64000 ADU, but a point source starts growing a flat top near 50000,
-    and a 12th-magnitude supernova in a 200 s frame sails past that while every
-    saturation test still reads clean. Anything at or above this level is
-    masked, so the PSF is fitted on the wings that are still linear.
+    Three things change them from the header value. The camera may quote the
+    unbinned sensor (``gain_is_unbinned``). A binned pixel may be the average
+    of n native pixels rather than the sum (``binning_mode``): an average of n
+    pixels has n times the electrons per ADU, and its read noise, in those
+    electrons, adds in quadrature to sqrt(n) times the native value. The same
+    holds for a stack of averaged sub-exposures (``stack_mode``). The software
+    rebinning sums, which leaves e-/ADU alone and adds read noise in
+    quadrature: sqrt(rebin**2) = rebin times the per-pixel value.
     """
-    explicit = cfg.get("image.nonlinear_adu") or defaults.get("nonlinear_adu")
-    if explicit:
-        return float(explicit)
-    frac = cfg.get("image.nonlinear_frac")
-    if frac is None:
-        frac = defaults.get("nonlinear_frac", 1.0)
-    return float(saturation) * float(frac)
+    gain = float(first_header_value(header, hmap.get("gain", ["GAIN"]), defaults.get("gain", 1.0)))
+    rn = float(first_header_value(header, hmap.get("readnoise", ["RDNOISE"]),
+                                  defaults.get("readnoise", 0.0)))
+    n = 1.0
+    bx, by = camera_binning
+    if bool(defaults.get("gain_is_unbinned", False)) and bx * by > 1:
+        if str(defaults.get("binning_mode", "average")).lower() == "average":
+            n *= bx * by
+        # summed binning: e-/ADU is unchanged, read noise grows by sqrt(n)
+        else:
+            rn *= np.sqrt(bx * by)
+    nsub = first_header_value(header, hmap.get("n_subframes", []) or [], 1)
+    try:
+        nsub = max(int(float(nsub)), 1)
+    except (TypeError, ValueError):
+        nsub = 1
+    if nsub > 1 and str(defaults.get("stack_mode", "average")).lower() == "average":
+        n *= nsub
+    info = {"gain_header": gain, "readnoise_header": rn, "gain_multiplier": n,
+            "n_subframes": nsub}
+    return gain * n, rn * np.sqrt(n) * float(rebin), info
 
-def _sexagesimal_coord(ra_value, dec_value) -> Optional[SkyCoord]:
-    """TJO writes RA in hours and Dec in degrees, both sexagesimal strings."""
+
+def _sexagesimal_coord(ra_value, dec_value, unit: str = "deg") -> Optional[SkyCoord]:
+    """Header coordinates: sexagesimal strings are read as hours/degrees, plain
+    numbers in *unit* ('deg' or 'hourangle') for RA -- TJO writes decimal degrees."""
     if ra_value is None or dec_value is None:
         return None
     try:
         if isinstance(ra_value, str) and (":" in ra_value or " " in ra_value.strip()):
             return SkyCoord(str(ra_value), str(dec_value), unit=(u.hourangle, u.deg))
-        return SkyCoord(float(ra_value), float(dec_value), unit=(u.deg, u.deg))
+        ra_unit = u.hourangle if str(unit).lower().startswith("hour") else u.deg
+        return SkyCoord(float(ra_value), float(dec_value), unit=(ra_unit, u.deg))
     except Exception as exc:  # pragma: no cover - malformed headers
         log.warning("could not parse target coordinates %r %r: %s", ra_value, dec_value, exc)
         return None
 
 
 class ScienceImage:
-    """A single reduced TJO exposure, ready for photometry."""
+    """A single reduced exposure, ready for photometry."""
 
     def __init__(self, data: np.ndarray, header: fits.Header, meta: ImageMeta,
                  wcs: Optional[WCS] = None):
@@ -115,13 +133,22 @@ class ScienceImage:
         if callable(chooser):
             instrument = chooser(header) or instrument
 
-        # Cut the unusable border, if this camera has one, before the WCS is
-        # read: apply_trim moves CRPIX with the crop.
-        from .detector import apply_trim
-        data, header, trimmed = apply_trim(data, header, instrument)
-
         hmap = instrument.get("header", {})
         defaults = instrument.get("defaults", {})
+        saturation = float(cfg.get("image.saturation_adu")
+                           or defaults.get("saturation_adu", 60000))
+
+        # Trim, mask the camera's known bad pixels and rebin, before the WCS is
+        # read: the header that comes back describes the new array.
+        from . import detector as detector_module
+        cam_bx, cam_by = detector_module.camera_binning(header, instrument)
+        data, header, prep = detector_module.prepare_raw(data, header, instrument,
+                                                         saturation=saturation)
+        trimmed = True if prep.get("trimmed") else None
+        rebin = int(prep.get("rebin", 1))
+        # Rebinning sums pixels, so one rebinned pixel saturates at f**2 times
+        # the native level (and _rebin_array marks saturated blocks that way).
+        saturation *= rebin ** 2
 
         raw_filter = str(first_header_value(header, hmap.get("filter", ["FILTER"]), "")).strip()
         band = instrument.get("filters", {}).get(raw_filter)
@@ -130,12 +157,9 @@ class ScienceImage:
             log.warning("filter %r not in the instrument map; using %r", raw_filter, band)
         system = instrument.get("systems", {}).get(band, "ab")
 
-        mjd = first_header_value(header, hmap.get("mjd", ["MJD-OBS"]))
-        if mjd is None:
-            jd = first_header_value(header, hmap.get("jd", ["JD"]))
-            mjd = float(jd) - 2400000.5 if jd is not None else float("nan")
+        mjd = header_mjd(header, hmap)
 
-        binning = float(first_header_value(header, hmap.get("binning_x", ["XFACTOR"]), 1) or 1)
+        binning = float(cam_bx * rebin)
 
         wcs = None
         try:
@@ -150,33 +174,46 @@ class ScienceImage:
         else:
             pixel_scale = float(defaults.get("pixel_scale", 1.0)) * binning
 
-        _saturation = float(cfg.get("image.saturation_adu")
-                            or defaults.get("saturation_adu", 60000))
+        gain, readnoise, noise_info = effective_gain(header, hmap, defaults,
+                                                     (cam_bx, cam_by), rebin)
+        exptime = float(first_header_value(header, hmap.get("exptime", ["EXPTIME"]), 1.0))
+        unit = hmap.get("coord_unit", "deg")
+        target_coord = _sexagesimal_coord(
+            first_header_value(header, hmap.get("target_ra", []) or []),
+            first_header_value(header, hmap.get("target_dec", []) or []), unit)
+        pointing = _sexagesimal_coord(
+            first_header_value(header, hmap.get("pointing_ra", []) or []),
+            first_header_value(header, hmap.get("pointing_dec", []) or []), unit)
+        observatory = {}
+        for key in ("obs_zp", "obs_zp_err", "obs_maglim", "obs_seeing"):
+            value = first_header_value(header, hmap.get(key, []) or [])
+            try:
+                observatory[key] = float(value) if value is not None else float("nan")
+            except (TypeError, ValueError):
+                observatory[key] = float("nan")
+
         meta = ImageMeta(
             path=path,
             object_name=str(first_header_value(header, hmap.get("object", ["OBJECT"]), path.stem)).strip(),
             band=band,
             system=system,
             mjd=float(mjd),
-            exptime=float(first_header_value(header, hmap.get("exptime", ["EXPTIME"]), 1.0)),
-            gain=float(first_header_value(header, hmap.get("gain", ["GAIN"]), defaults.get("gain", 1.0))),
-            readnoise=float(first_header_value(header, hmap.get("readnoise", ["RDNOISE"]),
-                                               defaults.get("readnoise", 0.0))),
-            saturation=_saturation,
-            nonlinear=_nonlinear_level(cfg, defaults, _saturation),
+            exptime=exptime,
+            gain=gain,
+            readnoise=readnoise,
+            saturation=saturation,
             pixel_scale=pixel_scale,
-            target_coord=_sexagesimal_coord(
-                first_header_value(header, hmap.get("target_ra", ["OBJRA"])),
-                first_header_value(header, hmap.get("target_dec", ["OBJDEC"])),
-            ),
+            target_coord=target_coord,
             airmass=first_header_value(header, hmap.get("airmass", ["AIRMASS"])),
             header_filter=raw_filter,
-            extra={"quality": first_header_value(header, hmap.get("quality", ["IMGQS"]))},
+            extra={"quality": first_header_value(header, hmap.get("quality", []) or []),
+                   "pointing": pointing, **observatory, **noise_info},
         )
 
         image = cls(data, header, meta, wcs)
         if trimmed is not None:
             image.qa["trimmed"] = True
+        image.qa["rebin"] = rebin
 
         if pattern is not None:
             from . import patterns as pattern_module
@@ -223,20 +260,6 @@ class ScienceImage:
         """Mask non-finite, saturated, dead, wildly negative and edge pixels."""
         mask = ~np.isfinite(self.data)
         mask |= self.data >= self.meta.saturation
-        # The detector turns over before it clips, so a core can be flat-topped
-        # while every pixel in it is still below `saturation`. Mask from the top
-        # of the linear range instead: aperture sums then flag themselves, the
-        # difference carries NaN there, and the PSF fit falls back on the wings,
-        # which is the only part of a compressed profile still carrying flux.
-        nonlinear = float(getattr(self.meta, "nonlinear", self.meta.saturation) or
-                          self.meta.saturation)
-        if nonlinear < self.meta.saturation:
-            hot = self.data >= nonlinear
-            if hot.any():
-                from scipy.ndimage import binary_dilation
-                mask |= binary_dilation(hot, iterations=1)
-                self.qa["nonlinear_pixels"] = int(hot.sum())
-                self.qa["nonlinear_adu"] = float(nonlinear)
         for bad in cfg.get("image.bad_value_mask", []) or []:
             mask |= self.data == float(bad)
 
@@ -283,22 +306,15 @@ class ScienceImage:
         return mask
 
     def _edge_margin(self, cfg) -> int:
-        """Edge margin in pixels. Configured in arcsec so it means the same
-        patch of sky whatever the binning: 24 px is 9 arcsec unbinned but 17
-        binned 2x2, and on a 1024 frame that fixed margin eats 9 per cent of
-        the field instead of 2."""
-        arcsec = cfg.get("image.edge_margin_arcsec")
-        if arcsec:
-            scale = float(self.meta.pixel_scale) or 1.0
-            return max(int(round(float(arcsec) / scale)), 0)
-        return int(cfg.get("image.edge_margin_px", 0) or 0)
+        """Edge margin in pixels (see utils.edge_margin_px)."""
+        return edge_margin_px(cfg, self.meta.pixel_scale)
 
     def _background_box(self, cfg) -> int:
         """Background mesh size in pixels.
 
         Configured in arcsec, for two reasons: the sky structure being
         modelled has an angular scale, and a fixed pixel box gives wildly
-        different mesh counts across TJO's readouts -- 128 px is 32x32 meshes
+        different mesh counts across binnings -- 128 px is 32x32 meshes
         on a 4096 frame but only 8x8 on a 1024 binned one, where a filter_size
         of 5 then spans most of the field and the 'local' background is
         effectively global. The box is also kept small enough to leave at least
@@ -343,6 +359,47 @@ class ScienceImage:
 
         self.qa["sky_adu"] = float(np.nanmedian(self.bkg_map))
         self.qa["sky_rms_adu"] = float(np.nanmedian(self.bkg_rms))
+        self._check_noise_model()
+
+    def _check_noise_model(self) -> None:
+        """Measured sky scatter over what the gain and read noise predict.
+
+        The gain enters every Poisson error bar and the cosmic-ray detector, and
+        for a binned CMOS frame it depends on how the camera combined pixels,
+        which the header does not say. The sky tells us: for a bias-subtracted
+        frame sigma_sky^2 = sky / gain + (readnoise / gain)^2 in ADU. The
+        pixel-to-pixel scatter is used rather than the Background2D RMS, which
+        also carries faint sources and sky structure.
+        """
+        try:
+            sky = float(self.qa.get("sky_adu", np.nan))
+            gain = float(self.meta.gain)
+            rn = float(self.meta.readnoise)
+            if not (np.isfinite(sky) and sky > 0 and gain > 0):
+                return
+            predicted = np.sqrt(sky / gain + (rn / gain) ** 2)
+            ny, nx = self.data.shape
+            core = (slice(ny // 4, 3 * ny // 4), slice(nx // 4, 3 * nx // 4))
+            d = self.data[core]
+            m = self.mask[core]
+            diff = (d[:, 1:] - d[:, :-1]) / np.sqrt(2.0)
+            good = ~(m[:, 1:] | m[:, :-1]) & np.isfinite(diff)
+            if good.sum() < 1000:
+                return
+            _, _, measured = sigma_clipped_stats(diff[good], sigma=3.0, maxiters=5)
+            ratio = float(measured / predicted)
+            self.qa["sky_noise_measured_adu"] = float(measured)
+            self.qa["sky_noise_predicted_adu"] = float(predicted)
+            self.qa["sky_noise_ratio"] = ratio
+            level = log.warning if not (0.75 <= ratio <= 1.33) else log.debug
+            level("%s: sky scatter %.2f ADU against %.2f predicted by gain %.2f e-/ADU and "
+                  "read noise %.1f e- (ratio %.2f)%s", self.meta.path.name, measured,
+                  predicted, gain, rn, ratio,
+                  "" if 0.75 <= ratio <= 1.33 else
+                  " -- the gain model looks wrong for this frame; check binning_mode / "
+                  "stack_mode in the instrument file")
+        except Exception as exc:  # pragma: no cover - diagnostic only
+            log.debug("noise-model check skipped: %s", exc)
 
     def build_error_map(self) -> np.ndarray:
         """Per-pixel 1-sigma uncertainty in ADU.

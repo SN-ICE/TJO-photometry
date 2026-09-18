@@ -38,7 +38,8 @@ from . import subtraction as sub
 from .calibration import ZeroPoint, calibrate_image
 from .detection import detect_sources, filter_by_profile, measure_fwhm, select_psf_stars
 from .image import ScienceImage
-from .utils import ensure_dir, first_header_value, get_logger, slugify
+from .utils import (UserError, edge_margin_px, ensure_dir, first_header_value,
+                    get_logger, header_mjd, slugify)
 
 log = get_logger("tjophot.pipeline")
 
@@ -75,10 +76,10 @@ def index_images(paths: Iterable[Path], instrument: dict,
         filters = this.get("filters", {})
         raw = str(first_header_value(header, hmap.get("filter", ["FILTER"]), "")).strip()
         band = filters.get(raw, filters.get(raw.replace("SDSS ", ""), raw))
-        mjd = first_header_value(header, hmap.get("mjd", ["MJD-OBS"]))
-        if mjd is None:
-            jd = first_header_value(header, hmap.get("jd", ["JD"]))
-            mjd = float(jd) - 2400000.5 if jd is not None else float("nan")
+        mjd = header_mjd(header, hmap)
+        if not np.isfinite(mjd):
+            log.warning("%s carries no usable date (no MJD-OBS, JD or DATE-OBS); "
+                        "it will sort and group as if it had no epoch", path.name)
         name = str(first_header_value(header, hmap.get("object", ["OBJECT"]), "")).strip()
         if target and name and name.lower() != target.lower():
             continue
@@ -88,28 +89,92 @@ def index_images(paths: Iterable[Path], instrument: dict,
     return sorted(index, key=lambda e: (e.band, e.mjd))
 
 
+def normalise_name(name: str) -> str:
+    """Comparable form of a transient name ('SN 2026abgb', 'AT2026abgb' -> '2026abgb').
+
+    TJO writes the bare TNS designation into OBJECT, while a target is usually
+    called SN... or AT... here, so the two must meet in the middle.
+    """
+    from .utils import normalise_name as _normalise
+    return _normalise(name)
+
+
+def _fits_under(directory: Path, patterns, recursive: bool) -> list[Path]:
+    from .config import PIPELINE_ROOT
+    out: list[Path] = []
+    pipeline_root = PIPELINE_ROOT.resolve()
+    for pattern in patterns:
+        found = directory.rglob(pattern) if recursive else directory.glob(pattern)
+        for path in found:
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            # Never pick up the pipeline's own cached templates or outputs.
+            if resolved == pipeline_root or pipeline_root in resolved.parents:
+                continue
+            if any(part.startswith(".") for part in path.relative_to(directory).parts):
+                continue
+            out.append(path)
+    return sorted(set(out))
+
+
 def find_images(cfg, target: str) -> list[Path]:
-    """Locate the FITS files for *target* under ``paths.data_root``."""
+    """Locate the FITS files for *target* under ``paths.data_root``.
+
+    In order:
+
+    1. a directory named after the target (``<data_root>/SN2026abgb/`` or the
+       bare designation, ``<data_root>/2026abgb/``) -- everything in it;
+    2. otherwise every FITS file anywhere under ``data_root`` whose OBJECT
+       header names the target, so frames can simply be dropped into the TJO
+       folder as they arrive. Files whose name contains the designation (TJO
+       puts it there) are checked first; only if none match is every header
+       read.
+    """
     root = Path(cfg.data_root).expanduser()
-    patterns = cfg.get("paths.glob", ["*.fits", "*.fit", "*.fits.gz"])
-    candidates: list[Path] = []
-    for directory in (root / target, root):
-        if not directory.is_dir():
-            continue
-        for pattern in patterns:
-            candidates.extend(sorted(directory.glob(pattern)))
-        if candidates:
-            break
-    return sorted(set(candidates))
+    patterns = cfg.get("paths.glob", ["*.fits", "*.fit", "*.fits.gz", "*.fts"])
+    wanted = normalise_name(target)
+    variants = [target, wanted, f"SN{wanted}", f"AT{wanted}", f"SN {wanted}"]
+    for name in dict.fromkeys(variants):
+        directory = root / name
+        if directory.is_dir():
+            found = _fits_under(directory, patterns, recursive=True)
+            if found:
+                return found
+
+    if not root.is_dir():
+        return []
+    candidates = _fits_under(root, patterns, recursive=True)
+    by_name = [p for p in candidates if wanted and wanted in normalise_name(p.stem)
+               or wanted in p.stem.lower()]
+    instrument = cfg.get("instrument_config", {}) or {}
+
+    def matches(path: Path) -> bool:
+        try:
+            header = fits.getheader(path)
+        except Exception:
+            return False
+        chooser = getattr(cfg, "instrument_for", None)
+        this = chooser(header) if callable(chooser) else instrument
+        keys = (this.get("header", {}) or {}).get("object", ["OBJECT"])
+        value = first_header_value(header, keys, "")
+        return normalise_name(value) == wanted
+
+    selected = [p for p in by_name if matches(p)]
+    if not selected:
+        selected = [p for p in candidates if p not in by_name and matches(p)]
+    return sorted(selected)
 
 
 def resolve_target_coord(cfg, index: Sequence[EpochIndex], instrument: dict) -> tuple:
     """SN position. Returns (coord, was_explicit).
 
-    An explicit ``target.ra``/``target.dec`` wins. Otherwise the telescope
-    pointing (OBJRA/OBJDEC) is used as a starting guess -- on TJO this is
-    typically about an arcsecond from the supernova, which is enough to bias a
-    1.2 x FWHM aperture, so it should be refined (see ``refine_target_coord``).
+    An explicit ``target.ra``/``target.dec`` wins. Otherwise the header is
+    tried: target coordinates if the instrument writes any, else the pointing
+    (for TJO, RA/DEC are the centre of the frame, which need not be the
+    transient at all). Either is only a starting guess for the name resolution
+    and the refinement in ``refine_target_coord``.
     """
     ra = cfg.get("target.ra")
     dec = cfg.get("target.dec")
@@ -118,24 +183,31 @@ def resolve_target_coord(cfg, index: Sequence[EpochIndex], instrument: dict) -> 
             return SkyCoord(str(ra), str(dec), unit=(u.hourangle, u.deg)), True
         return SkyCoord(float(ra), float(dec), unit="deg"), True
 
-    hmap = instrument.get("header", {})
-    ras, decs = [], []
-    for entry in index[: min(len(index), 20)]:
-        header = fits.getheader(entry.path)
-        rv = first_header_value(header, hmap.get("target_ra", ["OBJRA"]))
-        dv = first_header_value(header, hmap.get("target_dec", ["OBJDEC"]))
-        if rv is None or dv is None:
-            continue
-        try:
-            coord = SkyCoord(str(rv), str(dv), unit=(u.hourangle, u.deg))
-        except Exception:
-            continue
-        ras.append(coord.ra.deg)
-        decs.append(coord.dec.deg)
+    from .image import _sexagesimal_coord
+
+    ras, decs, what = [], [], "the telescope pointing"
+    for keys, label in ((("target_ra", "target_dec")), "the header target position"), \
+                       ((("pointing_ra", "pointing_dec")), "the centre of the frame"):
+        for entry in index[: min(len(index), 20)]:
+            header = fits.getheader(entry.path)
+            this = cfg.instrument_for(header) if hasattr(cfg, "instrument_for") else instrument
+            hmap = this.get("header", {}) or {}
+            coord = _sexagesimal_coord(
+                first_header_value(header, hmap.get(keys[0], []) or []),
+                first_header_value(header, hmap.get(keys[1], []) or []),
+                hmap.get("coord_unit", "deg"))
+            if coord is None:
+                continue
+            ras.append(coord.ra.deg)
+            decs.append(coord.dec.deg)
+        if ras:
+            what = label
+            break
     if not ras:
-        raise RuntimeError("cannot determine the target position; set target.ra / target.dec")
+        raise UserError("cannot determine the target position; set target.ra / target.dec "
+                        "in targets/<NAME>.yaml or configure TNS credentials")
     coord = SkyCoord(float(np.median(ras)) * u.deg, float(np.median(decs)) * u.deg)
-    log.info("starting from the telescope pointing (%s)", coord.to_string("hmsdms", precision=1))
+    log.info("starting from %s (%s)", what, coord.to_string("hmsdms", precision=1))
     return coord, False
 
 
@@ -304,11 +376,12 @@ def load_astrometry_reference(cfg, coord: SkyCoord, cache_root: Path,
                                   step=1.0, rounding="up")
     local_path = cfg.resolve_path(cfg.get("calibration.local_catalog"))
 
+    options = {"max_mag": cfg.get("astrometry.max_mag")}
     for provider in providers:
         try:
             table = cat.get_catalog(provider, float(coord.ra.deg), float(coord.dec.deg),
                                     radius, cache_root, refresh=refresh,
-                                    local_path=local_path)
+                                    local_path=local_path, options=options)
             if table is not None and len(table) >= int(cfg.get("astrometry.min_stars", 8)):
                 log.info("astrometric reference: %s (%d sources)", provider, len(table))
                 return table
@@ -345,17 +418,27 @@ def build_references(cfg, index: Sequence[EpochIndex], instrument: dict, coord: 
                     selection = selection[:max_images]
                 for entry in selection:
                     try:
-                        siblings.append(prepare_image(
+                        sibling = prepare_image(
                             entry.path, cfg, instrument,
                             pattern=pattern_for(patterns, band, entry.detector),
-                            astrometry_ref=astrometry_ref))
+                            astrometry_ref=astrometry_ref)
+                        # Every epoch of the stack is held at once. The stack
+                        # reads the pixels, the mask, the background model and
+                        # the WCS; the error map, the background RMS and the
+                        # cosmic-ray mask are three more full-frame arrays per
+                        # epoch that nothing downstream of here looks at.
+                        sibling.error = None
+                        sibling.bkg_rms = None
+                        sibling.crmask = None
+                        siblings.append(sibling)
                     except Exception as exc:
                         log.warning("template epoch %s failed: %s", entry.path.name, exc)
 
         try:
             references[band] = tpl.get_reference(
                 _FakeImage(band), cfg, cache_root, coord, siblings, target,
-                refresh=refresh, stamp_arcmin=stamp_arcmin, instrument=instrument)
+                refresh=refresh, stamp_arcmin=stamp_arcmin)
+            references[band] = tpl.register_reference(references[band], astrometry_ref, cfg)
         except Exception as exc:
             log.warning("reference for band %s failed: %s", band, exc)
             references[band] = None
@@ -396,6 +479,18 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
         astrom_rms_arcsec=image.qa.get("astrom_rms_arcsec", np.nan),
         astrom_nstars=image.qa.get("astrom_nstars", np.nan),
         detector=identify(image.header).label,
+        # The camera on its own, because the per-camera zero-point transfer
+        # needs it and used to recover it by splitting `detector` on whitespace
+        # -- a silent coupling to a label format defined in another module.
+        camera=identify(image.header).instrument,
+        pixel_scale=image.meta.pixel_scale,
+        rebin=image.qa.get("rebin", 1),
+        gain_eff=image.meta.gain,
+        sky_noise_ratio=image.qa.get("sky_noise_ratio", np.nan),
+        obs_zp=image.meta.extra.get("obs_zp", np.nan),
+        obs_zp_err=image.meta.extra.get("obs_zp_err", np.nan),
+        obs_maglim=image.meta.extra.get("obs_maglim", np.nan),
+        obs_seeing_arcsec=image.meta.extra.get("obs_seeing", np.nan),
         pattern_applied=bool(image.qa.get("pattern_applied", False)),
         fringe_scale_adu=image.qa.get("pattern_fringe_scale_adu", np.nan),
     )
@@ -435,27 +530,14 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
             cal_flags |= lc.FLAG_POOR_CALIBRATION
         if getattr(zp, "relaxed", False):
             cal_flags |= lc.FLAG_RELAXED_CALIBRATION
+        if not zp.meta.get("variables_screened", True):
+            cal_flags |= lc.FLAG_VARIABLES_UNSCREENED
+            log.warning("%s %s: the variable-star screen could not be run, so the "
+                        "zero point may rest on a variable", image.meta.path.name, band)
     common["flags_base"] = cal_flags
 
     sn_xy = image.pixel_of(coord)
     rows: list[dict] = []
-
-    # How much of the target's core sits above the linear range. The aperture
-    # sum loses those pixels outright and the PSF fit reconstructs them from
-    # the wings, so this decides both the flag and the extra uncertainty.
-    core_hot, core_masked = ph.nonlinear_core(image, sn_xy[0], sn_xy[1], fwhm)
-    core_min = int(cfg.get("photometry.nonlinear_core_min_px", 3))
-    core_repaired = core_hot >= core_min
-    core_flag = lc.FLAG_NONLINEAR_CORE if core_repaired else 0
-    core_syst = float(cfg.get("photometry.nonlinear_core_syst_mag", 0.05)) \
-        if core_repaired else 0.0
-    common["core_nonlinear_px"] = int(core_hot)
-    common["core_masked_px"] = int(core_masked)
-    common["core_syst_mag"] = core_syst
-    common["flags_base"] = int(common.get("flags_base", 0)) | core_flag
-    if core_repaired:
-        log.info("%s: %d core pixels above the linear ceiling -- flux fitted on "
-                 "the wings", image.meta.path.name, core_hot)
 
     # ---------------------------------------------------------------- direct
     tab = ph.measure_apertures(image, [sn_xy], ap_radius, cfg, annulus_px=annulus)
@@ -466,7 +548,7 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
     rows.append(_photometry_row(common, "aperture", float(tab["flux"][0]),
                                 aper_err, zp, apcor.apcor_mag,
                                 image, x=sn_xy[0], y=sn_xy[1],
-                                flags=int(tab["flags"][0]), limit=limit))
+                                flags=int(tab["flags"][0]), limit=limit, cfg=cfg))
 
     epsf, n_psf = ph.build_epsf(image, psf_stars, fwhm, cfg)
 
@@ -504,7 +586,7 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
                                         psf_err, zp, psf_corr, image,
                                         x=float(fit["x"][0]), y=float(fit["y"][0]),
                                         dx=float(fit["dx"][0]), dy=float(fit["dy"][0]),
-                                        flags=int(tab["flags"][0]), limit=limit))
+                                        flags=int(tab["flags"][0]), limit=limit, cfg=cfg))
 
     # ------------------------------------------------------------ difference
     diff = None
@@ -513,7 +595,8 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
         if diff.ok:
             rows.extend(_difference_rows(diff, image, cfg, coord, common, zp, limit,
                                          science_epsf=epsf, science_apcor=apcor.apcor_mag,
-                                         science_psf_corr=psf_corr, sources=sources))
+                                         science_psf_corr=psf_corr, sources=sources,
+                                         science_flags=int(tab["flags"][0])))
 
     if bool(cfg.get("output.write_qa_plots", True)):
         plots.epoch_qa(Path(outdir) / "qa" /
@@ -523,7 +606,7 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
                                     max(image.meta.pixel_scale, 1e-3) / 2))
 
     preference = str(cfg.get("output.primary_method", "auto"))
-    best = lc.choose_primary(rows, preference)
+    best = lc.choose_primary(rows, preference, _host_guard(cfg))
     if best is not None:
         best["primary"] = True
     return rows
@@ -531,15 +614,24 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
 
 def _difference_rows(diff, image, cfg, coord, common, zp, limit,
                      science_epsf=None, science_apcor: float = 0.0,
-                     science_psf_corr: float = 0.0, sources=None) -> list[dict]:
+                     science_psf_corr: float = 0.0, sources=None,
+                     science_flags: int = 0) -> list[dict]:
     """Aperture and PSF photometry on the difference image.
 
     When the reference was the frame that got convolved, the difference keeps
     the science PSF exactly, so the PSF model and aperture correction already
     measured on the full science frame are reused -- far more reliable than
     rebuilding them from the handful of stars inside the stamp.
+
+    *science_flags* are the aperture flags from the science frame. Only the
+    saturation bit is carried over: difference pixels scatter about zero, so a
+    saturation test on the stamp can never fire, and a saturated transient would
+    otherwise reach the light curve through an unflagged difference row. Masked
+    pixels need no such help -- they propagate as NaN into the difference and
+    the stamp's own mask finds them.
     """
     rows: list[dict] = []
+    science_flags = int(science_flags) & lc.FLAG_SATURATED
     stamp = _DifferenceImage(diff, image)
     fwhm = _matched_fwhm(diff, image)
     ann = cfg.get("photometry.annulus_scale", [5.0, 8.0])
@@ -589,6 +681,8 @@ def _difference_rows(diff, image, cfg, coord, common, zp, limit,
         ref_nimages=diff.meta.get("reference_n_images"),
         diff_mode=diff.mode, diff_chi2=diff.chi2,
         diff_kernel_sum=diff.kernel_sum, diff_nstamps=diff.n_stamps,
+        diff_kernel_dx=diff.meta.get("kernel_dx", np.nan),
+        diff_kernel_dy=diff.meta.get("kernel_dy", np.nan),
         **quality.as_dict(),
     )
 
@@ -620,12 +714,24 @@ def _difference_rows(diff, image, cfg, coord, common, zp, limit,
         if bool(cfg.get("photometry.empirical_errors", True)) else float("nan")
     diff_err = ph.combine_errors(float(tab["flux"][0]), float(tab["flux_err"][0]),
                                  sky_sigma, image.meta.gain * scale)
+    # Imperfect host subtraction around the transient, as an extra flux error.
+    host = diffquality.host_residual(diff.difference, diff.reference_stamp, sn_xy, fwhm, cfg,
+                                     noise_per_aperture=sky_sigma)
+    ap_flux = float(tab["flux"][0])
+    diff_meta["diff_host_residual"] = (host["sigma"] / ap_flux
+                                       if np.isfinite(ap_flux) and ap_flux > 0 else np.nan)
+    diff_meta["diff_host_nsites"] = host["n"]
+    # Kept apart from the statistical error: it widens mag_err but does not
+    # decide whether the transient is detected (a bright SN on a poorly
+    # subtracted host is still there; only its magnitude is less certain).
+    host_sys = float(host["sigma"]) * float(cfg.get("subtraction.host_residual.error_scale", 0.5)) \
+        if np.isfinite(host["sigma"]) else 0.0
     rows.append(_photometry_row({**common, **diff_meta}, "difference_aperture",
                                 float(tab["flux"][0]) / scale,
                                 diff_err / scale, zp, apcor_mag, image,
                                 x=sn_xy[0], y=sn_xy[1],
-                                flags=int(tab["flags"][0]) | bad_subtraction,
-                                limit=limit))
+                                flags=int(tab["flags"][0]) | bad_subtraction | science_flags,
+                                limit=limit, flux_err_sys=host_sys / scale, cfg=cfg))
 
     if not bool(cfg.get("photometry.psf.enabled", True)):
         return rows
@@ -644,13 +750,17 @@ def _difference_rows(diff, image, cfg, coord, common, zp, limit,
         if len(fit):
             dpsf_err = ph.combine_errors(float(fit["flux"][0]), float(fit["flux_err"][0]),
                                          sky_sigma, image.meta.gain * scale)
+            psf_sys = 0.0
+            if host_sys > 0 and np.isfinite(ap_flux) and ap_flux > 0:
+                # the same fractional residual, on the PSF (total-flux) scale
+                psf_sys = host_sys * abs(float(fit["flux"][0])) / ap_flux
             rows.append(_photometry_row({**common, **diff_meta}, "difference_psf",
                                         float(fit["flux"][0]) / scale,
                                         dpsf_err / scale, zp, psf_corr,
                                         image, x=float(fit["x"][0]), y=float(fit["y"][0]),
                                         dx=float(fit["dx"][0]), dy=float(fit["dy"][0]),
-                                        flags=int(tab["flags"][0]) | bad_subtraction,
-                                        limit=limit))
+                                        flags=int(tab["flags"][0]) | bad_subtraction | science_flags,
+                                        limit=limit, flux_err_sys=psf_sys / scale, cfg=cfg))
     return rows
 
 
@@ -709,102 +819,272 @@ class _MatchedImage(_StampBase):
 
 def _photometry_row(common: dict, method: str, flux: float, flux_err: float,
                     zp: ZeroPoint, apcor_mag: float, image, x=np.nan, y=np.nan,
-                    dx=np.nan, dy=np.nan, flags: int = 0, limit: float = np.nan) -> dict:
-    """Turn a flux measurement into a calibrated row."""
+                    dx=np.nan, dy=np.nan, flags: int = 0, limit: float = np.nan,
+                    flux_err_sys: float = 0.0, cfg=None) -> dict:
+    """Turn a flux measurement into a calibrated row.
+
+    *flux_err* is the statistical error and alone sets the SNR, hence whether
+    the row is a detection or a limit. *flux_err_sys* (same units) is added in
+    quadrature to ``mag_err`` only.
+    """
     common = dict(common)
     flags = int(flags) | int(common.pop("flags_base", 0))
-    # Reconstructing a compressed core from the wings recovers the flux but not
-    # for free: against an independently built PSF the injection test lands 3-6
-    # per cent low, so carry that as a systematic rather than reporting the
-    # usual hundredth-of-a-magnitude error on a repaired point.
-    core_syst = float(common.pop("core_syst_mag", 0.0) or 0.0)
     exptime = max(image.meta.exptime, 1e-6)
     snr = flux / flux_err if (np.isfinite(flux_err) and flux_err > 0) else np.nan
+    detection_snr = float(cfg.get("output.detection_snr", 3.0)) if cfg is not None else 3.0
 
     mag = np.nan
     mag_err = np.nan
     is_limit = True
-    if zp.ok and np.isfinite(flux) and flux > 0 and np.isfinite(snr) and snr >= 3.0:
+    if zp.ok and np.isfinite(flux) and flux > 0 and np.isfinite(snr) and snr >= detection_snr:
         inst = -2.5 * np.log10(flux / exptime) + apcor_mag
         mag = inst + zp.zp
-        mag_err = float(np.hypot(1.0857362 * flux_err / flux, zp.zp_err))
-        if core_syst:
-            mag_err = float(np.hypot(mag_err, core_syst))
+        sys = flux_err_sys if np.isfinite(flux_err_sys) else 0.0
+        mag_err = float(np.hypot(1.0857362 * np.hypot(flux_err, sys) / flux, zp.zp_err))
         is_limit = False
 
     return lc.new_row(
         **common, method=method, mag=mag, mag_err=mag_err, is_limit=is_limit,
         mag_offset=apcor_mag, zp_source=("fit" if zp.ok else ""),
         flux=flux / exptime, flux_err=flux_err / exptime, snr=snr,
+        flux_err_sys=(flux_err_sys / exptime if np.isfinite(flux_err_sys) else np.nan),
         x=x, y=y, dx=dx, dy=dy, flags=flags, limit_mag=limit,
     )
 
 
 # --------------------------------------------------------------------------
+# resuming a run
+# --------------------------------------------------------------------------
+def previous_run(outdir: Path, target: str):
+    """What an earlier run of this target left behind.
+
+    Returns ``(table, measured, written_at)``: the photometry table, the set of
+    image names in it, and when it was written. ``(None, set(), 0.0)`` when
+    there is nothing to resume from.
+    """
+    path = Path(outdir) / f"{target}_photometry_all.csv"
+    if not path.exists():
+        return None, set(), 0.0
+    try:
+        table = pd.read_csv(path)
+    except Exception as exc:
+        log.warning("could not read %s (%s); measuring every frame", path.name, exc)
+        return None, set(), 0.0
+    if "image" not in table.columns or table.empty:
+        return None, set(), 0.0
+    measured = {str(name) for name in table["image"].dropna()}
+    return table, measured, path.stat().st_mtime
+
+
+def pending_epochs(index: Sequence[EpochIndex], measured: set, written_at: float):
+    """The epochs that still need measuring, and why the others do not.
+
+    A frame is done when the previous table already holds it *and* the file has
+    not been touched since that table was written -- so a frame the observatory
+    re-reduces is measured again rather than silently keeping the old numbers.
+    """
+    todo, skipped, changed = [], 0, []
+    for entry in index:
+        if entry.path.name not in measured:
+            todo.append(entry)
+            continue
+        try:
+            touched = entry.path.stat().st_mtime > written_at
+        except OSError:
+            touched = False
+        if touched:
+            changed.append(entry.path.name)
+            todo.append(entry)
+        else:
+            skipped += 1
+    return todo, skipped, changed
+
+
+def previous_coord(outdir: Path, target: str):
+    """The sky position an earlier run adopted, so a resumed run keeps it.
+
+    Without this an incremental run re-resolves and re-centroids the target, and
+    the refinement samples whatever epochs happen to exist now -- so the new
+    rows would be measured a fraction of an arcsecond away from the old ones, in
+    the same table, for no reason the light curve could show.
+    """
+    path = Path(outdir) / "run_summary.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path) as fh:
+            text = json.load(fh).get("coord")
+        return SkyCoord(str(text), unit=(u.hourangle, u.deg)) if text else None
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------
+def _host_guard(cfg):
+    """``output.host_guard_mag`` as a float, or None when switched off."""
+    value = cfg.get("output.host_guard_mag", lc.HOST_GUARD_MAG)
+    if value in (None, False) or str(value).lower() in ("off", "none", "false"):
+        return None
+    return float(value)
+
+
+def _kernel_sum_comparable(frame: pd.DataFrame, cfg) -> tuple:
+    """Kernel sums put on a scale on which different epochs can be compared.
+
+    Returns ``(values, group_keys)``, both indexed like *frame*.
+
+    The raw kernel sum is the ratio of science to reference counts per pixel,
+    so it depends on everything that sets the science frame's counts: the
+    camera's sensitivity (the zero point), the exposure time, the pixel area
+    (a rebinned pixel collects four times the sky), and on which way round the
+    kernel was solved (in ``convolve_science`` mode it maps science onto the
+    reference, so it is the reciprocal). On a single-camera archive those are
+    nearly constant and the raw sum could be compared directly. TJO mixes
+    cameras on the same target -- on SN 2026abgb the QHY600 frames come out at
+    0.12-0.17 in g and the iKon936 frames at 0.78-0.92 -- and a raw comparison
+    flagged every frame of the minority camera as a failed subtraction.
+
+    Dividing out exposure time, 10**(0.4 zp) and pixel area leaves a number set
+    only by the reference, the same for every camera (and for every night,
+    since transparency moves the zero point and the kernel sum together).
+    Epochs with no zero point cannot be normalised; they are compared only with
+    uncalibrated epochs of the same detector configuration.
+    """
+    ks = pd.to_numeric(frame["diff_kernel_sum"], errors="coerce")
+    mode = frame.get("diff_mode", pd.Series("", index=frame.index)).astype(str)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        eff = np.where(mode == "convolve_science", 1.0 / ks, ks)
+    eff = pd.Series(eff, index=frame.index)
+
+    scale = pd.to_numeric(frame.get("pixel_scale", pd.Series(np.nan, index=frame.index)),
+                          errors="coerce")
+    if scale.isna().any():
+        # Tables written before the pixel_scale column: the aperture radius is
+        # aperture_scale x FWHM in pixels, and the FWHM is also given in arcsec.
+        ap_scale = float(cfg.get("photometry.aperture_scale", 1.2))
+        radius = pd.to_numeric(frame.get("aperture_radius_px"), errors="coerce")
+        fwhm = pd.to_numeric(frame.get("fwhm_arcsec"), errors="coerce")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            scale = scale.fillna(ap_scale * fwhm / radius)
+
+    zp = pd.to_numeric(frame.get("zp"), errors="coerce")
+    exptime = pd.to_numeric(frame.get("exptime"), errors="coerce")
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        norm = eff / (exptime * 10.0 ** (0.4 * zp) * scale ** 2)
+    calibrated = np.isfinite(norm) & (norm > 0)
+
+    detector = frame.get("detector", pd.Series("", index=frame.index)).astype(str)
+    values = pd.Series(np.where(calibrated, norm, eff), index=frame.index)
+    keys = pd.Series(np.where(calibrated, "calibrated", detector), index=frame.index)
+    return values, keys
+
+
 def _flag_collapsed_kernels(frame, cfg):
     """Flag difference measurements whose kernel solve collapsed.
 
     The kernel sum is the flux scaling from reference to science. It is set by
     the depth and units of the template, so there is no absolute value to test
     against -- but every epoch of a band against the same reference should get
-    roughly the same one. An epoch that comes out orders of magnitude away has
+    roughly the same one, once the camera, exposure and pixel size are divided
+    out (see ``_kernel_sum_comparable``). An epoch that comes out far away has
     not found a different scaling, it has failed to find one, and the flux
     measured through it means nothing.
 
-    On SN2022xkq this is what separates the difference measurements that agree
-    with an independent reduction from those off by more than 0.3 mag: median
-    kernel sum 20.3 against 0.027. It also explains their suspiciously *low*
-    chi2 (0.36 against 5.5) -- a collapsed solve leaves an inflated noise model,
-    so the frame looks well fitted precisely because it was not fitted at all.
+    On SN2022xkq (TJO) this is what separated the difference measurements that
+    agree with an independent reduction from those off by more than 0.3 mag:
+    median kernel sum 20.3 against 0.027. It also explains their suspiciously
+    *low* chi2 (0.36 against 5.5) -- a collapsed solve leaves an inflated noise
+    model, so the frame looks well fitted precisely because it was not fitted.
     """
     if not bool(cfg.get("subtraction.check_kernel_sum", True)) or frame.empty:
         return frame
     if "diff_kernel_sum" not in frame.columns:
         return frame
-    nsigma = float(cfg.get("subtraction.kernel_sum_nsigma", 5.0))
-    floor = float(cfg.get("subtraction.kernel_sum_floor_dex", 0.35))
-    if nsigma <= 0:
+    tol = float(cfg.get("subtraction.kernel_sum_tolerance", 3.0))
+    if tol <= 1:
         return frame
+    min_images = int(cfg.get("subtraction.kernel_sum_min_images", 5))
+    warn_fraction = float(cfg.get("subtraction.kernel_sum_warn_fraction", 0.05) or 0)
 
-    ks = pd.to_numeric(frame["diff_kernel_sum"], errors="coerce")
+    values, keys = _kernel_sum_comparable(frame, cfg)
     is_diff = frame["method"].astype(str).str.startswith("difference")
+    ref_source = frame.get("ref_source", pd.Series("", index=frame.index)).fillna("")
     flagged = 0
-    for key, idx in frame[is_diff].groupby(
-            [frame["band"], frame.get("ref_source", "")]).groups.items():
-        vals = ks.loc[idx]
+    sub_frame = frame[is_diff]
+    for key, idx in sub_frame.groupby([sub_frame["band"], ref_source[is_diff],
+                                       keys[is_diff]]).groups.items():
+        vals = values.loc[idx]
         good = vals[np.isfinite(vals) & (vals > 0)]
-        if len(good) < 8:
+        # One image contributes two rows (PSF and aperture), so count images.
+        n_images = frame.loc[good.index, "image"].nunique() if "image" in frame else len(good)
+        ref = float(np.median(good)) if len(good) else float("nan")
+
+        # The spread is worth reporting whether or not the group is big enough
+        # to reject on. The tolerance is a factor of 3 -- it catches a collapsed
+        # solve, not a wobble -- but a few per cent of scatter in the kernel sum
+        # is a tenth of a magnitude once the host in the aperture is a few times
+        # the transient, and that used to go by in silence.
+        #
+        # The 16-84 percentile range, not peak to peak: the full range widens
+        # with the number of frames on its own, so a healthy 28-frame band reads
+        # 5-8 per cent of it and a 4-frame band reads less, and a threshold on
+        # that would fire on the good data and stay quiet on the bad. Measured
+        # on this archive: 1.9-3.1 per cent across SN 2026abgb's three bands,
+        # 2.2-2.9 on SN 2026abwp once the kernel had enough stamps, and 8.6 on
+        # the SN 2026abwp r band that put two frames nine minutes apart 0.21 mag
+        # (5.4 sigma) apart. Four frames is the fewest the percentiles mean
+        # anything on.
+        if warn_fraction > 0 and np.isfinite(ref) and ref > 0 and len(good) >= 4:
+            spread = float(np.percentile(good, 84) - np.percentile(good, 16)) / ref
+            if spread > warn_fraction:
+                log.warning("%s %s (%s): the normalised kernel sum scatters by %.1f%% "
+                            "across %d frames. The kernel's flux scale sets how much "
+                            "reference is subtracted, so on a bright host this is a real "
+                            "magnitude error, not a rounding one. Check diff_nstamps.",
+                            key[0], key[1] or "reference",
+                            "normalised" if key[2] == "calibrated" else key[2],
+                            100 * spread, n_images)
+
+        if n_images < min_images:
+            log.info("%s %s (%s): only %d frames, so the kernel-sum consistency check "
+                     "was skipped (needs %d, see subtraction.kernel_sum_min_images)",
+                     key[0], key[1] or "reference",
+                     "normalised" if key[2] == "calibrated" else key[2],
+                     n_images, min_images)
             continue
-        # In log space, and against the spread this band actually shows. The
-        # kernel sum scales with the frame's throughput, so a campaign spanning
-        # a magnitude or two of transparency spreads it over a factor of tens
-        # legitimately -- a fixed tolerance flags most of a good griz season.
-        # A collapsed solve is not merely off-centre, it is orders out.
-        logs = np.log10(good.astype(float))
-        centre = float(np.median(logs))
-        spread = max(float(np.median(np.abs(logs - centre))) * 1.4826, floor)
-        lo, hi = centre - nsigma * spread, centre + nsigma * spread
-        with np.errstate(divide="ignore", invalid="ignore"):
-            lv = np.log10(vals.astype(float).where(vals > 0))
-        bad = idx[(~np.isfinite(vals)) | (vals <= 0) | (lv < lo) | (lv > hi)]
+        if not np.isfinite(ref) or ref <= 0:
+            continue
+        bad = idx[(~np.isfinite(vals)) | (vals <= 0)
+                  | (vals > ref * tol) | (vals < ref / tol)]
         if len(bad):
             frame.loc[bad, "flags"] = (frame.loc[bad, "flags"].fillna(0).astype(int)
-                                       | lc.FLAG_BAD_SUBTRACTION)
+                                       | lc.FLAG_BAD_SUBTRACTION | lc.FLAG_KERNEL_SUM)
             flagged += len(bad)
-            log.info("%s %s: %d of %d difference epochs have a kernel sum outside "
-                     "10^[%.2f, %.2f] (band median %.3g); flagged as bad subtractions",
-                     key[0], key[1] or "reference", len(bad), len(idx),
-                     lo, hi, 10 ** centre)
+            log.info("%s %s (%s): %d of %d difference rows have a kernel sum more than "
+                     "x%.1f from the band median; flagged as bad subtractions",
+                     key[0], key[1] or "reference",
+                     "normalised" if key[2] == "calibrated" else key[2],
+                     len(bad), len(idx), tol)
     if flagged:
-        frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")))
+        frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")),
+                                     _host_guard(cfg))
     return frame
 
 
 def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
         max_images: Optional[int] = None, refresh: bool = False,
         skip_subtraction: bool = False, append: bool = False,
-        skip: int = 0) -> dict:
-    """Full pipeline for one target. Returns a dict of output paths."""
+        skip: int = 0, resume: Optional[bool] = None) -> dict:
+    """Full pipeline for one target. Returns a dict of output paths.
+
+    By default the run picks up where the last one left off: frames already in
+    ``<target>_photometry_all.csv`` are left alone and only the new ones are
+    measured, so a night's worth of new images costs a night's worth of work
+    rather than the whole campaign. ``resume=False`` (``--no-resume``) measures
+    everything again and merges; ``tjophot clean`` or ``--clean`` removes the
+    outputs so there is nothing to resume from, which is what to use after
+    changing anything in the configuration that the old rows were measured with.
+    """
     started = time.time()
     instrument = cfg.get("instrument_config", {})
     outdir = ensure_dir(Path(cfg.work_root) / target)
@@ -812,7 +1092,7 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
 
     paths = find_images(cfg, target)
     if not paths:
-        raise RuntimeError(f"no FITS files found for {target} under {cfg.data_root}")
+        raise UserError(f"no FITS files found for {target} under {cfg.data_root}")
     full_index = index_images(paths, instrument, target=None, cfg=cfg)
     if bands:
         full_index = [e for e in full_index if e.band in bands]
@@ -822,13 +1102,44 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
     if max_images:
         index = index[:max_images]
     if not index:
-        raise RuntimeError("no epochs left after filtering")
+        raise UserError("no epochs left after filtering")
 
     present = sorted({e.band for e in index})
     log.info("%s: %d images, bands %s, MJD %.3f-%.3f", target, len(index), ",".join(present),
              min(e.mjd for e in index), max(e.mjd for e in index))
 
+    # -- what an earlier run already did -----------------------------------
+    if resume is None:
+        resume = bool(cfg.get("output.resume", True))
+    existing, measured, written_at = (None, set(), 0.0)
+    if resume or append:
+        existing, measured, written_at = previous_run(outdir, target)
+    if not resume:
+        measured = set()          # measure everything, but still merge with the old table
+    todo, skipped, changed = pending_epochs(index, measured, written_at)
+    if skipped or changed:
+        log.info("%d of %d frames were measured before and are unchanged; %d to do%s",
+                 skipped, len(index), len(todo),
+                 f", {len(changed)} of them re-reduced since" if changed else "")
+    if not todo and existing is not None:
+        log.info("nothing new to measure. Re-writing the outputs from the existing "
+                 "table; use --no-resume to measure it all again, or 'tjophot clean' "
+                 "if the configuration has changed since.")
+
     coord, explicit = resolve_target_coord(cfg, full_index, instrument)
+
+    # A resumed run must measure the new frames at the same position as the old
+    # ones. Re-resolving is usually harmless, but the centroid refinement samples
+    # whatever epochs exist now, so adding a night would shift the adopted
+    # position by a fraction of an arcsecond -- and old and new rows would sit in
+    # one table measured at two different places.
+    if resume and not explicit and str(cfg.get("target.resolve", "auto")).lower() != "always" \
+            and str(cfg.get("target.refine", "auto")).lower() != "always":
+        earlier = previous_coord(outdir, target)
+        if earlier is not None:
+            log.info("keeping the position the earlier run adopted (%s)",
+                     earlier.to_string("hmsdms", precision=2))
+            coord, explicit = earlier, True
 
     mode = str(cfg.get("target.resolve", "auto")).lower()
     if mode == "always" or (mode == "auto" and not explicit):
@@ -880,7 +1191,7 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
     log.info("SN position: %s", coord.to_string("hmsdms", precision=2))
 
     references: dict = {}
-    if bool(cfg.get("subtraction.enabled", True)) and not skip_subtraction:
+    if todo and bool(cfg.get("subtraction.enabled", True)) and not skip_subtraction:
         references = build_references(cfg, full_index, instrument, coord, target, cache_root,
                                       present, refresh=refresh, patterns=patterns,
                                       astrometry_ref=astrometry_ref,
@@ -888,14 +1199,23 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
 
     rows: list[dict] = []
     failures: list[dict] = []
-    for k, entry in enumerate(index, 1):
-        log.info("[%d/%d] %s", k, len(index), entry.path.name)
+    for k, entry in enumerate(todo, 1):
+        log.info("[%d/%d] %s", k, len(todo), entry.path.name)
         try:
             image = prepare_image(entry.path, cfg, instrument,
                                   pattern=pattern_for(patterns, entry.band, entry.detector),
                                   astrometry_ref=astrometry_ref)
-            if not image.contains(coord, margin=int(cfg.get("image.edge_margin_px", 24))):
-                raise RuntimeError("the target position falls outside this frame")
+            if image.wcs is None:
+                raise RuntimeError("no astrometric solution in the header, so the target "
+                                   "cannot be placed (the observatory pipeline failed on "
+                                   "this frame; its sky level is %.0f ADU)"
+                                   % float(image.qa.get("sky_adu", np.nan)))
+            if not image.contains(coord, margin=edge_margin_px(cfg, image.meta.pixel_scale)):
+                centre = image.center_coord()
+                raise RuntimeError("the target position falls outside this frame, whose "
+                                   "centre is %.1f arcmin away (%s)" % (
+                                       centre.separation(coord).arcmin,
+                                       centre.to_string("hmsdms", precision=0)))
             rows.extend(process_image(image, cfg, coord, cache_root,
                                       references.get(entry.band), outdir, target,
                                       refresh=refresh))
@@ -905,33 +1225,48 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
         finally:
             image = None
 
-    if not rows:
-        raise RuntimeError("no photometry could be measured")
+    if not rows and existing is None:
+        raise UserError("no photometry could be measured")
 
-    frame = lc.to_frame(rows)
+    preference = str(cfg.get("output.primary_method", "auto"))
+
+    # Merge first, then run the campaign-wide steps on the whole table. Both of
+    # them need the campaign to be there: the kernel-sum check compares each
+    # frame against its band's median, and the band-to-band zero-point transfer
+    # needs several nights where both bands were calibrated. Run on one night's
+    # new rows alone they quietly do nothing -- which is exactly what a resumed
+    # run would hand you. lc.write's own append path merged after they had
+    # already run, so this is a fix for --append as well.
+    frame = lc.to_frame(rows) if rows else None
+    if existing is not None:
+        frame = (lc.merge(existing, frame, preference, _host_guard(cfg))
+                 if frame is not None
+                 else lc.reselect_primary(existing, preference, _host_guard(cfg)))
+
     frame = _flag_collapsed_kernels(frame, cfg)
 
     if bool(cfg.get("calibration.transfer_zeropoints", True)):
         frame, transfer_report = zeropoints.transfer(frame, cfg)
         if transfer_report.get("recovered"):
-            frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")))
+            frame = lc.reselect_primary(frame, preference, _host_guard(cfg))
     else:
         transfer_report = {}
 
-    paths_out = lc.write(frame, outdir, target, append=append,
-                         preference=str(cfg.get("output.primary_method", "auto")))
-    if append:
-        import pandas as pd
-        frame = pd.read_csv(paths_out["all"])
+    # Already merged above, so nothing for write() to append to.
+    paths_out = lc.write(frame, outdir, target, append=False, preference=preference)
 
     if bool(cfg.get("output.write_qa_plots", True)):
         plots.lightcurve(outdir / f"{target}_lightcurve.png", frame, target)
+    if bool(cfg.get("output.write_diagnostics", True)):
         plots.run_diagnostics(outdir / f"{target}_diagnostics.png", frame, target)
 
     summary = {
         "target": target,
         "config_files": cfg.get("_config_files", []),
         "n_images": len(index),
+        "n_measured_now": len(todo),
+        "n_skipped_already_done": skipped,
+        "n_remeasured_after_change": len(changed),
         "n_rows": len(frame),
         "n_failures": len(failures),
         "failures": failures,
@@ -952,6 +1287,8 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
                 "path": str(ref.path) if ref.path else None,
                 "pixel_scale_arcsec": round(float(ref.pixel_scale), 4),
                 "n_images": ref.n_images,
+                "registered_shift_arcsec": (round(float(ref.registration.shift_arcsec), 3)
+                                            if getattr(ref, "registration", None) else None),
             })
             for band, ref in references.items()
         },
@@ -960,6 +1297,7 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
         json.dump(summary, fh, indent=2)
     cfg.dump(outdir / "config_used.yaml")
 
-    log.info("done in %.1f s -- %s", summary["elapsed_s"], outdir)
+    log.info("done in %.1f s (%d frames measured, %d already done) -- %s",
+             summary["elapsed_s"], len(todo), skipped, outdir)
     print("\n" + lc.summarise(frame) + "\n")
     return {**paths_out, "outdir": outdir, "summary": summary, "frame": frame}
