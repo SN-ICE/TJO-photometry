@@ -25,6 +25,7 @@ import argparse
 import csv
 import sys
 from collections import defaultdict
+from datetime import date, timedelta
 from pathlib import Path
 
 import matplotlib
@@ -61,6 +62,22 @@ INK = "#1a1a1a"
 MUTED = "#6b7280"
 JOIN = "#9aa0a6"        # the thin dashed line tying one object's points
 SURFACE = "#fcfcfb"
+SHADE = "#6b7280"       # alternating calendar-year bands
+
+MJD_EPOCH = date(1858, 11, 17)      # MJD 0
+
+
+def mjd_of_year(year: int) -> float:
+    """MJD at 00:00 UTC on 1 January of `year`."""
+    return float((date(year, 1, 1) - MJD_EPOCH).days)
+
+
+def year_spans(mjd_lo: float, mjd_hi: float):
+    """[(year, start_mjd, end_mjd), ...] covering the range, ends included."""
+    first = (MJD_EPOCH + timedelta(days=int(np.floor(mjd_lo)))).year
+    last = (MJD_EPOCH + timedelta(days=int(np.ceil(mjd_hi)))).year
+    return [(y, mjd_of_year(y), mjd_of_year(y + 1))
+            for y in range(first, last + 1)]
 
 
 def read_all(targets, subtracted_only: bool, flag_exclude: set[str]):
@@ -113,6 +130,15 @@ def main(argv=None) -> int:
                     metavar=("BRIGHT", "FAINT"))
     ap.add_argument("--errorbars", action="store_true",
                     help="draw magnitude error bars (off: too dense by default)")
+    ap.add_argument("--no-year-shading", action="store_true",
+                    help="do not shade the odd calendar years")
+    ap.add_argument("--year-alpha", type=float, default=0.1,
+                    help="opacity of the odd-year shading (default 0.1)")
+    ap.add_argument("--year-labels", choices=("top", "inside", "none"),
+                    default="top",
+                    help="where to write the year numbers: 'top' above the "
+                         "first panel (default), 'inside' along the top of it "
+                         "(may collide with the title), or 'none'")
     ap.add_argument("--panel-height", type=float, default=1.75)
     ap.add_argument("--title", default="TJO/MEIA2",
                     help="label for the top-left of the first panel")
@@ -170,6 +196,8 @@ def main(argv=None) -> int:
     fig.patch.set_facecolor(SURFACE)
     fig.subplots_adjust(hspace=0.0)
 
+    spans = year_spans(xlim[0] + offset, xlim[1] + offset)
+
     tally: list = []
     for ax, band in zip(axes, bands):
         ax.set_facecolor(SURFACE)
@@ -199,6 +227,17 @@ def main(argv=None) -> int:
 
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
+
+        # Alternating calendar years, so a bump can be placed on the calendar
+        # without arithmetic. Odd years carry the tint; even ones are the bare
+        # surface. zorder 0 keeps it behind the joining lines and the markers,
+        # and axvspan spans the full height whatever the y limits end up being.
+        if not args.no_year_shading:
+            for year, lo, hi in spans:
+                if year % 2:
+                    ax.axvspan(lo - offset, hi - offset, color=SHADE,
+                               alpha=args.year_alpha, lw=0, zorder=0)
+
         ax.invert_yaxis()
         ax.tick_params(direction="in", top=True, right=True, which="both",
                        colors=INK, labelsize=10)
@@ -217,6 +256,22 @@ def main(argv=None) -> int:
                   bbox_to_anchor=(0.0, 0.80) if ax is axes[0] else None,
                   labelcolor=colour, fontsize=13)
         tally.append((band, n_obj, n_pt))
+
+    # One number per year, centred on the part of that year that is actually
+    # visible, so the first and last years are labelled where they are seen
+    # rather than off the edge. A sliver too narrow for the text is skipped.
+    if args.year_labels != "none":
+        top = args.year_labels == "top"
+        width = xlim[1] - xlim[0]
+        for year, lo, hi in spans:
+            left, right = max(lo - offset, xlim[0]), min(hi - offset, xlim[1])
+            if right - left < 0.045 * width:
+                continue
+            axes[0].annotate(
+                str(year), xy=(0.5 * (left + right), 1.012 if top else 0.975),
+                xycoords=("data", "axes fraction"),
+                ha="center", va="bottom" if top else "top",
+                fontsize=10, color=MUTED, clip_on=not top)
 
     axes[0].annotate(args.title, xy=(0.012, 0.93), xycoords="axes fraction",
                      ha="left", va="top", fontsize=15, color=INK)
