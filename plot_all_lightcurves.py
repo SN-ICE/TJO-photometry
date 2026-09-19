@@ -120,6 +120,12 @@ def main(argv=None) -> int:
                     default=["bad_subtraction", "no_zeropoint"],
                     help="drop epochs carrying any of these flags "
                          "(pass none to keep everything)")
+    ap.add_argument("--years", nargs=2, type=int, default=(2021, 2026),
+                    metavar=("FIRST", "LAST"),
+                    help="x axis runs from 1 January of FIRST to 31 December "
+                         "of LAST (default 2021 2026), so the year shading "
+                         "tiles the panel exactly. Pass 0 0 to fit the data "
+                         "instead")
     ap.add_argument("--mjd-offset", type=float, default=None,
                     help="x axis is MJD minus this (default: a round number "
                          "just below the earliest epoch)")
@@ -140,8 +146,10 @@ def main(argv=None) -> int:
                          "first panel (default), 'inside' along the top of it "
                          "(may collide with the title), or 'none'")
     ap.add_argument("--panel-height", type=float, default=1.75)
-    ap.add_argument("--title", default="TJO/MEIA2",
-                    help="label for the top-left of the first panel")
+    ap.add_argument("--title", default="",
+                    help="optional label for the top-left of the first panel; "
+                         "empty (the default) leaves that corner to the band "
+                         "legend")
     ap.add_argument("--outdir", type=Path, default=None)
     ap.add_argument("--name", default="all_lightcurves",
                     help="output file stem")
@@ -171,8 +179,20 @@ def main(argv=None) -> int:
 
     offset = (args.mjd_offset if args.mjd_offset is not None
               else float(np.floor(mjds.min() / 1000.0) * 1000.0))
-    pad = 0.03 * (mjds.max() - mjds.min() or 1.0)
-    xlim = (mjds.min() - offset - pad, mjds.max() - offset + pad)
+    first_year, last_year = args.years
+    if first_year and last_year:
+        # Whole calendar years, so the shading tiles the panel edge to edge
+        # and the axis does not move as new epochs come in.
+        lo, hi = mjd_of_year(first_year), mjd_of_year(last_year + 1)
+        outside = int(np.count_nonzero((mjds < lo) | (mjds >= hi)))
+        if outside:
+            print(f"  note: {outside} epoch{'s' if outside != 1 else ''} fall "
+                  f"outside {first_year}-{last_year} and are off the axis; "
+                  f"widen with --years", file=sys.stderr)
+        xlim = (lo - offset, hi - offset)
+    else:
+        pad = 0.03 * (mjds.max() - mjds.min() or 1.0)
+        xlim = (mjds.min() - offset - pad, mjds.max() - offset + pad)
     if args.mag_range:
         ylim = tuple(args.mag_range)
     else:
@@ -217,7 +237,7 @@ def main(argv=None) -> int:
                 yl = y.copy()
                 if args.gap_days > 0:
                     yl[np.flatnonzero(np.diff(x) > args.gap_days)] = np.nan
-                ax.plot(x, yl, ls="--", lw=1.4, color=JOIN, alpha=0.85, zorder=2)
+                ax.plot(x, yl, ls="-", lw=1.4, color=JOIN, alpha=0.85, zorder=2)
 
             if args.errorbars:
                 ax.errorbar(x, y, yerr=arr[:, 2], fmt="none", ecolor=colour,
@@ -243,18 +263,24 @@ def main(argv=None) -> int:
                        colors=INK, labelsize=10)
         for spine in ax.spines.values():
             spine.set_color(INK)
-        ax.yaxis.set_major_locator(MultipleLocator(2))
+        # Panels are flush (hspace 0), so a tick label on a panel's bottom
+        # edge lands on top of the next panel's top one. Keep only the ticks
+        # strictly inside, which costs nothing: the limits are shared, so the
+        # dropped values are still readable on the neighbouring panel.
+        lo_y, hi_y = min(ylim), max(ylim)
+        ticks = np.arange(np.ceil(lo_y / 2.0) * 2.0, hi_y + 1e-9, 2.0)
+        ax.set_yticks(ticks[(ticks > lo_y + 0.25) & (ticks < hi_y - 0.25)])
         ax.yaxis.set_minor_locator(MultipleLocator(0.5))
         ax.xaxis.set_minor_locator(AutoMinorLocator())
 
-        # Marker plus dashed line, exactly as the panel draws them.
+        # Marker plus joining line, exactly as the panel draws them. Every
+        # panel anchors its legend the same way now that no title shares the
+        # first one's top-left corner.
         ax.legend(handles=[Line2D([], [], marker=marker, ms=7, mfc=colour,
-                                  mec="black", mew=0.5, ls="--", lw=1.4,
+                                  mec="black", mew=0.5, ls="-", lw=1.4,
                                   color=JOIN, label=f"${band}$")],
                   loc="upper left", frameon=False, handletextpad=0.4,
-                  borderaxespad=0.7,
-                  bbox_to_anchor=(0.0, 0.80) if ax is axes[0] else None,
-                  labelcolor=colour, fontsize=13)
+                  borderaxespad=0.7, labelcolor=colour, fontsize=13)
         tally.append((band, n_obj, n_pt))
 
     # One number per year, centred on the part of that year that is actually
@@ -273,8 +299,9 @@ def main(argv=None) -> int:
                 ha="center", va="bottom" if top else "top",
                 fontsize=10, color=MUTED, clip_on=not top)
 
-    axes[0].annotate(args.title, xy=(0.012, 0.93), xycoords="axes fraction",
-                     ha="left", va="top", fontsize=15, color=INK)
+    if args.title:
+        axes[0].annotate(args.title, xy=(0.012, 0.93), xycoords="axes fraction",
+                         ha="left", va="top", fontsize=15, color=INK)
     axes[-1].set_xlabel(f"MJD − {offset:.0f}", fontsize=13, color=INK)
     fig.supylabel("Apparent Brightness (mag)", fontsize=13, color=INK, x=0.035)
 
