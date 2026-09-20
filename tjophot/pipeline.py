@@ -379,9 +379,12 @@ def load_astrometry_reference(cfg, coord: SkyCoord, cache_root: Path,
     options = {"max_mag": cfg.get("astrometry.max_mag")}
     for provider in providers:
         try:
-            table = cat.get_catalog(provider, float(coord.ra.deg), float(coord.dec.deg),
-                                    radius, cache_root, refresh=refresh,
-                                    local_path=local_path, options=options)
+            table = cat.get_catalog(
+                provider, float(coord.ra.deg), float(coord.dec.deg),
+                radius, cache_root, refresh=refresh,
+                local_path=local_path, options=options,
+                reuse_within_arcsec=cat.resolve_reuse_arcsec(
+                    cfg.get("calibration.reuse_cached_within_arcsec", "auto"), radius))
             if table is not None and len(table) >= int(cfg.get("astrometry.min_stars", 8)):
                 log.info("astrometric reference: %s (%d sources)", provider, len(table))
                 return table

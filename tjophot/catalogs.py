@@ -22,6 +22,7 @@ local      : a user-supplied CSV/ECSV file (columns ra, dec, <band>, e_<band>).
 from __future__ import annotations
 
 import hashlib
+import re
 import warnings
 from pathlib import Path
 from typing import Mapping, Optional
@@ -128,6 +129,75 @@ def save_cache(table: Table, cache_root: Path, provider: str, ra: float, dec: fl
     except Exception as exc:  # pragma: no cover
         log.warning("could not write cache %s: %s", path, exc)
     return path
+
+
+def _sep_arcsec(ra1: float, dec1: float, ra2: float, dec2: float) -> float:
+    return float(SkyCoord(ra1 * u.deg, dec1 * u.deg)
+                 .separation(SkyCoord(ra2 * u.deg, dec2 * u.deg)).arcsec)
+
+
+def resolve_reuse_arcsec(value, radius_arcmin: float) -> float:
+    """How far off centre a cached catalogue may be and still be reused.
+
+    ``auto`` is a fifth of the search radius. The radius is already sized with
+    margin over the frame's half-diagonal, so giving up the outer fifth still
+    leaves every star the calibration actually reaches. Set it to 0, ``off`` or
+    ``none`` to require an exact grid hit.
+    """
+    if value in (None, False) or str(value).strip().lower() in ("off", "none", "false"):
+        return 0.0
+    if str(value).strip().lower() == "auto":
+        return 0.2 * float(radius_arcmin) * 60.0
+    return max(float(value), 0.0)
+
+
+def _nearby_cached(cache_root: Path, provider: str, ra: float, dec: float,
+                   radius_arcmin: float, variant: Optional[str] = None,
+                   within_arcsec: float = 0.0) -> Optional[Table]:
+    """The closest cached catalogue of the same shape within *within_arcsec*.
+
+    A catalogue is a cone, so one fetched *d* away still covers the requested
+    field out to ``radius - d``. The exact-key lookup snaps the centre to a
+    0.01 deg grid -- 36 arcsec, far finer than the cone is wide -- so a
+    dithered campaign re-fetched the same field once per pointing: nine copies
+    of one 10 arcmin field on SN2021adlr before this existed. Each of those is
+    a queued job on the Gaia archive, minutes apiece.
+
+    Only a file with the same provider, radius and variant is considered. A
+    different variant means a different depth or colour cut, not the same
+    catalogue shifted, and reusing across that would silently calibrate against
+    the wrong star list.
+    """
+    if within_arcsec <= 0:
+        return None
+    folder = Path(cache_root) / "catalogs"
+    if not folder.is_dir():
+        return None
+    tag = f"_{slugify(variant)}" if variant else ""
+    name_re = re.compile(
+        rf"^{re.escape(provider)}_(-?\d+\.\d{{4}})([+-]\d+\.\d{{4}})"
+        rf"_r{radius_arcmin:.1f}{re.escape(tag)}_[0-9a-f]{{8}}\.ecsv$")
+    best, best_sep = None, None
+    for path in folder.glob(f"{provider}_*.ecsv"):
+        match = name_re.match(path.name)
+        if match is None:
+            continue
+        try:
+            sep = _sep_arcsec(ra, dec, float(match.group(1)), float(match.group(2)))
+        except ValueError:                                  # pragma: no cover
+            continue
+        if sep <= within_arcsec and (best_sep is None or sep < best_sep):
+            best, best_sep = path, sep
+    if best is None:
+        return None
+    try:
+        table = Table.read(best, format="ascii.ecsv")
+    except Exception as exc:                                # pragma: no cover
+        log.warning("could not read cache %s: %s", best, exc)
+        return None
+    log.info("reusing cached %s catalogue (%d rows) from %s, %.0f arcsec off centre",
+             provider, len(table), best.name, best_sep)
+    return table
 
 
 # --------------------------------------------------------------------------
@@ -362,7 +432,8 @@ _FETCHERS = {
 def get_catalog(provider: str, ra: float, dec: float, radius_arcmin: float,
                 cache_root: Path, refresh: bool = False,
                 local_path: Optional[Path] = None,
-                options: Optional[Mapping] = None) -> Table:
+                options: Optional[Mapping] = None,
+                reuse_within_arcsec: float = 0.0) -> Table:
     """Fetch (or read from cache) a reference catalogue around a position.
 
     *options* are extra keyword arguments for the provider's fetcher, and any
@@ -385,6 +456,12 @@ def get_catalog(provider: str, ra: float, dec: float, radius_arcmin: float,
 
     if not refresh:
         cached = load_cached(cache_root, provider, ra, dec, radius_arcmin, variant)
+        if cached is not None:
+            return cached
+        # The grid is finer than the cone is wide, so accept a neighbour that
+        # already covers this field rather than queueing another archive job.
+        cached = _nearby_cached(cache_root, provider, ra, dec, radius_arcmin,
+                                variant, reuse_within_arcsec)
         if cached is not None:
             return cached
 

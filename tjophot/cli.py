@@ -374,10 +374,12 @@ def cmd_fetch_catalog(args) -> int:
     ok = 0
     for provider in providers:
         try:
-            table = cat.get_catalog(provider, float(coord.ra.deg), float(coord.dec.deg),
-                                    radius, Path(cfg.cache_root), refresh=args.refresh,
-                                    local_path=cfg.resolve_path(
-                                        cfg.get("calibration.local_catalog")))
+            table = cat.get_catalog(
+                provider, float(coord.ra.deg), float(coord.dec.deg),
+                radius, Path(cfg.cache_root), refresh=args.refresh,
+                local_path=cfg.resolve_path(cfg.get("calibration.local_catalog")),
+                reuse_within_arcsec=cat.resolve_reuse_arcsec(
+                    cfg.get("calibration.reuse_cached_within_arcsec", "auto"), radius))
             skip = {"ra", "dec", "objID", "source_id"}
             bands = [c for c in table.colnames
                      if len(c) <= 2 and c not in skip

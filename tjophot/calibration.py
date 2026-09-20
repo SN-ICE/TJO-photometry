@@ -266,8 +266,11 @@ def _calibrate_once(image, sources: Table, fwhm_px: float, cfg, cache_root: Path
             messages.append(f"{provider}: no {band} band")
             continue
         try:
-            table = cat.get_catalog(provider, ra0, dec0, radius, cache_root,
-                                    refresh=refresh, local_path=local_path)
+            table = cat.get_catalog(
+                provider, ra0, dec0, radius, cache_root,
+                refresh=refresh, local_path=local_path,
+                reuse_within_arcsec=cat.resolve_reuse_arcsec(
+                    cfg.get("calibration.reuse_cached_within_arcsec", "auto"), radius))
         except Exception as exc:
             messages.append(f"{provider}: {exc}")
             log.warning("%s catalogue unavailable: %s", provider, exc)

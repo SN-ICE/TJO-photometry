@@ -168,6 +168,13 @@ photometry:
 
 # ---------------------------- flux calibration -----------------------------
 calibration:
+  # A catalogue is a cone, so one fetched a little off centre still covers this
+  # field out to radius minus that offset. Without this every pointing of a
+  # dithered campaign queued its own archive job: nine copies of one 10 arcmin
+  # field on SN2021adlr. 'auto' is a fifth of the radius; 0 or 'off' requires an
+  # exact hit on the 0.01 deg cache grid.
+  reuse_cached_within_arcsec: auto
+
   catalogs: [gaia_synth, panstarrs, apass]   # tried in order, per band
   search_radius_arcmin: auto     # as above: sized to the frame being calibrated
   match_radius_arcsec: 1.5
