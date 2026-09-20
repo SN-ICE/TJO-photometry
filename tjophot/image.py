@@ -106,8 +106,12 @@ def effective_gain(header, hmap: dict, defaults: dict, camera_binning=(1, 1),
 
 
 def _sexagesimal_coord(ra_value, dec_value, unit: str = "deg") -> Optional[SkyCoord]:
-    """Header coordinates: sexagesimal strings are read as hours/degrees, plain
-    numbers in *unit* ('deg' or 'hourangle') for RA -- TJO writes decimal degrees."""
+    """Header coordinates. TJO writes RA in hours and Dec in degrees, both as
+    sexagesimal strings, so a string with ":" (or spaces) is always read as
+    hours/degrees. A plain number carries no such marker, and its RA unit comes
+    from the instrument file's ``coord_unit`` ('deg' or 'hourangle', default
+    'deg'); the TJO instrument files set ``hourangle`` so that a frame writing
+    OBJRA as a bare number is not read 15x wrong. Dec is degrees either way."""
     if ra_value is None or dec_value is None:
         return None
     try:

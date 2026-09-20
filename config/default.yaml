@@ -109,9 +109,6 @@ image:
     smooth_blocks: 24.0        # illumination = pattern smoothed on this many blocks
                                # (24 x 16 px ~ 380 px, well above the ~100 px fringes)
     min_frames: 8
-    # Refuse a pattern larger than this peak-to-peak: a detector pattern is a
-    # few per cent, so more than this means one bright field dominated the
-    # median or bad pixels went unmasked, not that the detector is unusual.
     # Refuse a pattern larger than this peak-to-peak. Every trustworthy pattern
     # measured on this archive is at most 5.8% (z-band fringing, the largest
     # real effect there is); anything above 8% has been a bright host galaxy
@@ -322,19 +319,23 @@ subtraction:
                                # (bigger = more stars for the kernel and the PSF)
   max_chi2: 2.5                # above this the difference is flagged as unreliable
   # Every epoch of a band against the same reference should get roughly the
-  # same kernel sum (the flux scaling reference -> science). One that lands a
-  # factor of this away has not found a different scaling, it has failed to
-  # find one, and its flux means nothing.
+  # same kernel sum (the flux scaling reference -> science), once exposure
+  # time, zero point and pixel area are divided out. One that lands orders of
+  # magnitude away has not found a different scaling, it has failed to find
+  # one, and its flux means nothing. The cut is made in log10 of the
+  # normalised kernel sum, at nsigma robust sigmas (MAD x 1.4826) around the
+  # group median -- adaptive, because a season spanning a magnitude or two of
+  # transparency spreads the kernel sum legitimately and a fixed factor would
+  # flag most of a good griz campaign.
   check_kernel_sum: true
-  kernel_sum_nsigma: 5.0       # robust sigma, in log10(kernel sum), within a band (no longer read; superseded by kernel_sum_tolerance)
-  kernel_sum_floor_dex: 0.35   # never tighter than this, however tight the band is (no longer read; superseded by kernel_sum_warn_fraction / kernel_sum_min_images)
-  kernel_sum_tolerance: 3.0
+  kernel_sum_nsigma: 5.0       # robust sigma, in log10(normalised kernel sum), within a band
+  kernel_sum_floor_dex: 0.35   # never tighter than this in dex, however tight the band is
   # Frames a band needs before the median it is compared against means anything.
   # Below this the check is skipped -- and says so, rather than passing silently.
   kernel_sum_min_images: 5
   # Report (never flag) when the normalised kernel sums of a band scatter by
   # more than this, measured as the 16-84 percentile range over the median so
-  # that it does not grow with the number of frames. The tolerance above catches
+  # that it does not grow with the number of frames. The cut above catches
   # a collapsed solve; this catches the few-per-cent wobble that still costs a
   # tenth of a magnitude when the host inside the aperture is a few times the
   # transient. Healthy data on this archive sits at 1.9-3.1 per cent; the

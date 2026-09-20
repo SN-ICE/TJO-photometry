@@ -1,10 +1,12 @@
 """WCS refinement.
 
-Frames arrive with a header astrometric solution (TJO: TAN-SIP from the
-observatory pipeline), which is close but not necessarily tight against Gaia. Since every aperture, PSF fit
-and difference-image stamp is placed through the WCS, it is worth re-fitting it
-against the same catalogue used for the photometric calibration before anything
-else happens.
+TJO frames arrive with an astrometry.net solution, written as TAN-SIP by the
+observatory pipeline. It is close but not tight against Gaia: on SN2026acd the
+residuals against a reference catalogue are a non-negligible fraction of a
+pixel and there is a systematic offset between the header pointing and the true
+source positions. Since every aperture, PSF fit and difference-image stamp is
+placed through the WCS, it is worth re-fitting it against the same catalogue
+used for the photometric calibration before anything else happens.
 
 Three fit modes, in increasing freedom:
 

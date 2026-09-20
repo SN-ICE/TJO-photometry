@@ -216,7 +216,7 @@ def build_tjo_stack(images: Sequence, cfg, coord: SkyCoord, band: str,
         key = f"{target}|{band}|" + ",".join(f"{m:.5f}" for m in mjds)
         digest = hashlib.md5(key.encode()).hexdigest()[:10]
         cache_key = ensure_dir(Path(cache_root) / "templates") / \
-            f"{target}_{band_token(band)}_tttstack_{digest}.fits"
+            f"{target}_{band_token(band)}_tjostack_{digest}.fits"
         if cache_key.exists():
             log.info("reference for %s: cached TJO stack %s", band, cache_key.name)
             ref = from_file(cache_key, band)
@@ -434,7 +434,7 @@ def fetch_hips_cutout(coord: SkyCoord, band: str, survey: str, size_arcmin: floa
         return None
 
     header["HIPS"] = (survey, "HiPS survey rendered by hips2fits")
-    header["TTTBAND"] = (band, "science band this reference serves")
+    header["TJOBAND"] = (band, "science band this reference serves")
     fits.PrimaryHDU(data=data.astype(np.float32), header=header).writeto(cache, overwrite=True)
 
     wcs = WCS(header).celestial
@@ -648,7 +648,7 @@ def fetch_panstarrs_cutout(coord: SkyCoord, band: str, size_arcmin: float,
     # leaving BSOFTEN would invite a second asinh conversion.
     for key in ("BSCALE", "BZERO", "BLANK", "BSOFTEN", "BOFFSET"):
         header.pop(key, None)
-    if header.get("TTTLIN", False):
+    if header.get("TJOLIN", False):
         header["BUNIT"] = ("linear", "PS1 asinh scaling removed by tjophot")
     fits.PrimaryHDU(data=data.astype(np.float32), header=header).writeto(cache, overwrite=True)
 
@@ -665,7 +665,7 @@ def linearise_ps1(data: np.ndarray, header: fits.Header) -> np.ndarray:
         flux = BOFFSET + BSOFTEN * (10**(0.4*x) - 10**(-0.4*x))
     Images without BSOFTEN are already linear and are returned unchanged.
     """
-    if header.get("TTTLIN", False):
+    if header.get("TJOLIN", False):
         return data                     # already linearised, do not do it twice
     if "BSOFTEN" not in header or "BOFFSET" not in header:
         return data                     # warp images and cutouts are already linear
@@ -673,7 +673,7 @@ def linearise_ps1(data: np.ndarray, header: fits.Header) -> np.ndarray:
     boffset = float(header["BOFFSET"])
     with np.errstate(over="ignore", invalid="ignore"):
         linear = boffset + bsoften * (10.0 ** (0.4 * data) - 10.0 ** (-0.4 * data))
-    header["TTTLIN"] = (True, "PS1 asinh scaling removed")
+    header["TJOLIN"] = (True, "PS1 asinh scaling removed")
     log.info("linearised PS1 pixels (BSOFTEN %.4g, BOFFSET %.4g)", bsoften, boffset)
     return linear
 
@@ -731,7 +731,7 @@ def register_reference(ref: ReferenceImage, astrometry_ref, cfg) -> ReferenceIma
         result = astrom.refine_wcs(shim, sources, astrometry_ref, Config(local))
         if result.ok and result.wcs is not None:
             ref.wcs = result.wcs
-            ref.header["TTTREGSH"] = (round(float(result.shift_arcsec), 4),
+            ref.header["TJOREGSH"] = (round(float(result.shift_arcsec), 4),
                                       "arcsec the WCS moved when registered to Gaia")
             log.info("reference for %s: registered on the astrometric catalogue (%s, "
                      "%d stars, rms %.3f\" -> %.3f\", moved %.2f\")", ref.band, mode,

@@ -1,10 +1,29 @@
 """Detector configurations: which camera, read out how.
 
-An archive is rarely a single instrument. TJO runs more than one telescope and
-camera, and the same camera can be read out at different binnings. A *detector
-configuration* is the tuple (instrument, array shape the pipeline works on,
-binning), and anything measured on the detector -- fringe patterns,
+A single telescope's archive is not a single instrument. TJO's frames span at
+least three configurations:
+
+* MEIA2 read out as a centred 1048 x 1048 window   (6.3 arcmin, 0.361 "/px)
+* MEIA2 read out full frame, 2048 x 2048          (12.3 arcmin, 0.361 "/px)
+* MEIA3, 3108 x 3108                              (20.8 arcmin, 0.402 "/px,
+                                                   gain 1.94, read noise 8.3)
+
+Two of those differ only in how much of the same chip was digitised; the third
+is a different camera with different gain, read noise and plate scale. The same
+camera can also be read out at different binnings. Both kinds of change matter,
+and they matter in the same place, so the pipeline treats them uniformly: a
+*detector configuration* is the tuple (instrument, array shape the pipeline
+works on, binning), and anything measured on the detector -- fringe patterns,
 illumination residuals -- is keyed by it.
+
+That is not fussiness. A fringe pattern is fixed in detector coordinates and
+has no meaning on an array of a different size, and a windowed readout is not
+a rescaling of the full frame: it is a crop, at an origin the header does not
+record (TJO writes OFFSET1 = OFFSET2 = 0 for both). Stretching a 2048-pixel
+pattern across a 1048-pixel frame would put the ripples in the wrong place and
+add structure rather than remove it. That is why
+:func:`tjophot.patterns.geometry_matches` compares the stored shape as well as
+the offset before a pattern is applied.
 
 This module also owns the step between the FITS file and the pixels the
 pipeline measures (:func:`prepare_raw`): an optional border trim, masking of
@@ -39,7 +58,7 @@ class Detector:
 
     @property
     def token(self) -> str:
-        """Filesystem-safe key, e.g. ``qhy600-ttt3_1595x1064_b6``."""
+        """Filesystem-safe key, e.g. ``meia2_2048x2048``, ``meia3_3108x3108_b2``."""
         name = slugify(self.instrument).lower() or "unknown"
         token = f"{name}_{self.nx}x{self.ny}"
         if self.binning != 1:
@@ -100,6 +119,11 @@ def trim_slices(header, instrument: Optional[dict]):
 
 def apply_trim(data, header, instrument: Optional[dict]):
     """Cut an unusable border off a frame, keeping the WCS valid.
+
+    MEIA3 frames carry a real edge artefact: the outer ~500 px run 10 to 60 per
+    cent off the sky level while the centre is flat to under 1 per cent. MEIA2
+    has no such border -- measured flat to 1 per cent out to the corners -- so
+    the trim belongs to the instrument, not to the pipeline.
 
     Only frames that are still the full chip are trimmed (see
     :func:`trim_slices`). CRPIX moves with the crop; the SIP coefficients are

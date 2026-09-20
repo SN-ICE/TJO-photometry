@@ -1010,22 +1010,34 @@ def _flag_collapsed_kernels(frame, cfg):
     the depth and units of the template, so there is no absolute value to test
     against -- but every epoch of a band against the same reference should get
     roughly the same one, once the camera, exposure and pixel size are divided
-    out (see ``_kernel_sum_comparable``). An epoch that comes out far away has
-    not found a different scaling, it has failed to find one, and the flux
-    measured through it means nothing.
+    out (see ``_kernel_sum_comparable``). An epoch whose normalised kernel sum
+    comes out orders of magnitude away has not found a different scaling, it
+    has failed to find one, and the flux measured through it means nothing.
+
+    The test is made in log space, against the spread the band itself shows,
+    and never tighter than ``subtraction.kernel_sum_floor_dex``. Normalising
+    removes the bulk of the throughput term but not all of it: the kernel sum
+    still carries whatever the zero point, exposure and pixel area could not
+    account for, so a campaign spanning a magnitude or two of transparency
+    spreads it over a factor of several legitimately -- a fixed multiplicative
+    tolerance flags most of a good griz season. A collapsed solve is not merely
+    off-centre, it is orders out, which is what the log-space cut looks for.
 
     On SN2022xkq (TJO) this is what separated the difference measurements that
     agree with an independent reduction from those off by more than 0.3 mag:
-    median kernel sum 20.3 against 0.027. It also explains their suspiciously
-    *low* chi2 (0.36 against 5.5) -- a collapsed solve leaves an inflated noise
-    model, so the frame looks well fitted precisely because it was not fitted.
+    median kernel sum 20.3 against 0.027, nearly three decades apart -- a gap
+    no normalisation closes and no plausible band spread reaches. It also
+    explains their suspiciously *low* chi2 (0.36 against 5.5) -- a collapsed
+    solve leaves an inflated noise model, so the frame looks well fitted
+    precisely because it was not fitted at all.
     """
     if not bool(cfg.get("subtraction.check_kernel_sum", True)) or frame.empty:
         return frame
     if "diff_kernel_sum" not in frame.columns:
         return frame
-    tol = float(cfg.get("subtraction.kernel_sum_tolerance", 3.0))
-    if tol <= 1:
+    nsigma = float(cfg.get("subtraction.kernel_sum_nsigma", 5.0))
+    floor = float(cfg.get("subtraction.kernel_sum_floor_dex", 0.35))
+    if nsigma <= 0:
         return frame
     min_images = int(cfg.get("subtraction.kernel_sum_min_images", 5))
     warn_fraction = float(cfg.get("subtraction.kernel_sum_warn_fraction", 0.05) or 0)
@@ -1044,10 +1056,10 @@ def _flag_collapsed_kernels(frame, cfg):
         ref = float(np.median(good)) if len(good) else float("nan")
 
         # The spread is worth reporting whether or not the group is big enough
-        # to reject on. The tolerance is a factor of 3 -- it catches a collapsed
-        # solve, not a wobble -- but a few per cent of scatter in the kernel sum
-        # is a tenth of a magnitude once the host in the aperture is a few times
-        # the transient, and that used to go by in silence.
+        # to reject on. The log-space cut catches a collapsed solve, not a
+        # wobble -- but a few per cent of scatter in the kernel sum is a tenth
+        # of a magnitude once the host in the aperture is a few times the
+        # transient, and that used to go by in silence.
         #
         # The 16-84 percentile range, not peak to peak: the full range widens
         # with the number of frames on its own, so a healthy 28-frame band reads
@@ -1078,17 +1090,25 @@ def _flag_collapsed_kernels(frame, cfg):
             continue
         if not np.isfinite(ref) or ref <= 0:
             continue
-        bad = idx[(~np.isfinite(vals)) | (vals <= 0)
-                  | (vals > ref * tol) | (vals < ref / tol)]
+        # In log space, and against the spread this band actually shows, with a
+        # floor so that a band which happens to be very tight does not start
+        # rejecting honest epochs.
+        logs = np.log10(good.astype(float))
+        centre = float(np.median(logs))
+        spread_dex = max(float(np.median(np.abs(logs - centre))) * 1.4826, floor)
+        lo, hi = centre - nsigma * spread_dex, centre + nsigma * spread_dex
+        with np.errstate(divide="ignore", invalid="ignore"):
+            lv = np.log10(vals.astype(float).where(vals > 0))
+        bad = idx[(~np.isfinite(vals)) | (vals <= 0) | (lv < lo) | (lv > hi)]
         if len(bad):
             frame.loc[bad, "flags"] = (frame.loc[bad, "flags"].fillna(0).astype(int)
                                        | lc.FLAG_BAD_SUBTRACTION | lc.FLAG_KERNEL_SUM)
             flagged += len(bad)
-            log.info("%s %s (%s): %d of %d difference rows have a kernel sum more than "
-                     "x%.1f from the band median; flagged as bad subtractions",
+            log.info("%s %s (%s): %d of %d difference rows have a kernel sum outside "
+                     "10^[%.2f, %.2f] (group median %.3g); flagged as bad subtractions",
                      key[0], key[1] or "reference",
                      "normalised" if key[2] == "calibrated" else key[2],
-                     len(bad), len(idx), tol)
+                     len(bad), len(idx), lo, hi, 10 ** centre)
     if flagged:
         frame = lc.reselect_primary(frame, str(cfg.get("output.primary_method", "auto")),
                                      _host_guard(cfg))

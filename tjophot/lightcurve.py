@@ -277,7 +277,7 @@ def write(frame: pd.DataFrame, outdir: Path, target: str,
         "target", "mjd", "band", "system", "mag", "mag_err", "limit_mag", "is_limit",
         "flux", "flux_err", "snr", "zp", "zp_err", "zp_source", "fwhm_arcsec",
         "astrom_rms_arcsec",
-        "detector", "pattern_applied", "method", "diff_verdict",
+        "detector", "core_nonlinear_px", "core_masked_px", "pattern_applied", "method", "diff_verdict",
         "cal_provider", "cal_nstars", "cal_rms", "ref_source", "flags", "flags_str", "image",
     ]]
     slim.to_csv(lc_path, index=False, float_format="%.6f")
