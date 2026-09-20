@@ -22,6 +22,7 @@ local      : a user-supplied CSV/ECSV file (columns ra, dec, <band>, e_<band>).
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import warnings
 from pathlib import Path
@@ -96,10 +97,28 @@ def _snap(value: float, grid: float = CACHE_GRID_DEG) -> float:
     return float(np.round(value / grid) * grid)
 
 
+def _snap_radius(radius_arcmin: float) -> float:
+    """The radius a cache entry is keyed and fetched at, rounded up to 0.1'.
+
+    The key used to be built from the radius at three decimals while the file
+    name showed one, so 9.996 and 10.040 arcmin wrote two different files both
+    called ``r10.0`` and each missed the other. The radius comes from the
+    frame's angular size, so a slightly different shape or trim silently
+    fetched the whole catalogue again and the log said ``r=10.0'`` both times.
+
+    Rounding *up* rather than to nearest keeps the entry honest: the download
+    is made at the snapped radius, so the file always covers at least what any
+    request in its bucket asked for. The round() guards the float noise that
+    would otherwise push an exact 10.0 up into the 10.1 bucket.
+    """
+    return math.ceil(round(float(radius_arcmin) * 10.0, 6)) / 10.0
+
+
 def _cache_path(cache_root: Path, provider: str, ra: float, dec: float,
                 radius_arcmin: float, variant: Optional[str] = None) -> Path:
     ra, dec = _snap(ra), _snap(dec)
-    key = f"{provider}_{ra:.5f}_{dec:.5f}_{radius_arcmin:.3f}"
+    radius_arcmin = _snap_radius(radius_arcmin)
+    key = f"{provider}_{ra:.5f}_{dec:.5f}_{radius_arcmin:.1f}"
     if variant:
         key += f"_{variant}"
     digest = hashlib.md5(key.encode()).hexdigest()[:8]
@@ -176,7 +195,7 @@ def _nearby_cached(cache_root: Path, provider: str, ra: float, dec: float,
     tag = f"_{slugify(variant)}" if variant else ""
     name_re = re.compile(
         rf"^{re.escape(provider)}_(-?\d+\.\d{{4}})([+-]\d+\.\d{{4}})"
-        rf"_r{radius_arcmin:.1f}{re.escape(tag)}_[0-9a-f]{{8}}\.ecsv$")
+        rf"_r{_snap_radius(radius_arcmin):.1f}{re.escape(tag)}_[0-9a-f]{{8}}\.ecsv$")
     best, best_sep = None, None
     for path in folder.glob(f"{provider}_*.ecsv"):
         match = name_re.match(path.name)
@@ -465,8 +484,9 @@ def get_catalog(provider: str, ra: float, dec: float, radius_arcmin: float,
         if cached is not None:
             return cached
 
-    # Query the grid point too, so the download matches what gets cached.
-    table = fetcher(_snap(ra), _snap(dec), radius_arcmin, **options)
+    # Query the grid point and the snapped radius, so the download really
+    # covers what its cache key promises.
+    table = fetcher(_snap(ra), _snap(dec), _snap_radius(radius_arcmin), **options)
     save_cache(table, cache_root, provider, ra, dec, radius_arcmin, variant)
     log.info("%s: %d sources retrieved", provider, len(table))
     return table
