@@ -37,7 +37,8 @@ class ImageMeta:
     exptime: float
     gain: float                  # e-/ADU
     readnoise: float             # e-
-    saturation: float            # ADU
+    saturation: float            # ADU -- hard ceiling
+    nonlinear: float             # ADU -- top of the trustworthy range
     pixel_scale: float           # arcsec/px
     target_coord: Optional[SkyCoord] = None
     airmass: Optional[float] = None
@@ -47,6 +48,25 @@ class ImageMeta:
     @property
     def epoch_id(self) -> str:
         return f"{self.mjd:.5f}_{self.band}"
+
+
+def _nonlinear_level(cfg, defaults, saturation: float) -> float:
+    """Top of the range where the detector still responds linearly.
+
+    A CCD does not go from linear to clipped at one value: it turns over well
+    below the hard ceiling and flattens into a plateau. On MEIA2 the ceiling is
+    around 64000 ADU, but a point source starts growing a flat top near 50000,
+    and a 12th-magnitude supernova in a 200 s frame sails past that while every
+    saturation test still reads clean. Anything at or above this level is
+    masked, so the PSF is fitted on the wings that are still linear.
+    """
+    explicit = cfg.get("image.nonlinear_adu") or defaults.get("nonlinear_adu")
+    if explicit:
+        return float(explicit)
+    frac = cfg.get("image.nonlinear_frac")
+    if frac is None:
+        frac = defaults.get("nonlinear_frac", 1.0)
+    return float(saturation) * float(frac)
 
 
 def effective_gain(header, hmap: dict, defaults: dict, camera_binning=(1, 1),
@@ -202,6 +222,7 @@ class ScienceImage:
             gain=gain,
             readnoise=readnoise,
             saturation=saturation,
+            nonlinear=_nonlinear_level(cfg, defaults, saturation),
             pixel_scale=pixel_scale,
             target_coord=target_coord,
             airmass=first_header_value(header, hmap.get("airmass", ["AIRMASS"])),
@@ -260,6 +281,20 @@ class ScienceImage:
         """Mask non-finite, saturated, dead, wildly negative and edge pixels."""
         mask = ~np.isfinite(self.data)
         mask |= self.data >= self.meta.saturation
+        # The detector turns over before it clips, so a core can be flat-topped
+        # while every pixel in it is still below `saturation`. Mask from the top
+        # of the linear range instead: aperture sums then flag themselves, the
+        # difference carries NaN there, and the PSF fit falls back on the wings,
+        # which is the only part of a compressed profile still carrying flux.
+        nonlinear = float(getattr(self.meta, "nonlinear", self.meta.saturation) or
+                          self.meta.saturation)
+        if nonlinear < self.meta.saturation:
+            hot = self.data >= nonlinear
+            if hot.any():
+                from scipy.ndimage import binary_dilation
+                mask |= binary_dilation(hot, iterations=1)
+                self.qa["nonlinear_pixels"] = int(hot.sum())
+                self.qa["nonlinear_adu"] = float(nonlinear)
         for bad in cfg.get("image.bad_value_mask", []) or []:
             mask |= self.data == float(bad)
 

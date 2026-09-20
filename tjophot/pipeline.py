@@ -437,7 +437,7 @@ def build_references(cfg, index: Sequence[EpochIndex], instrument: dict, coord: 
         try:
             references[band] = tpl.get_reference(
                 _FakeImage(band), cfg, cache_root, coord, siblings, target,
-                refresh=refresh, stamp_arcmin=stamp_arcmin)
+                refresh=refresh, stamp_arcmin=stamp_arcmin, instrument=instrument)
             references[band] = tpl.register_reference(references[band], astrometry_ref, cfg)
         except Exception as exc:
             log.warning("reference for band %s failed: %s", band, exc)
@@ -538,6 +538,23 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
 
     sn_xy = image.pixel_of(coord)
     rows: list[dict] = []
+
+    # How much of the target's core sits above the linear range. The aperture
+    # sum loses those pixels outright and the PSF fit reconstructs them from
+    # the wings, so this decides both the flag and the extra uncertainty.
+    core_hot, core_masked = ph.nonlinear_core(image, sn_xy[0], sn_xy[1], fwhm)
+    core_min = int(cfg.get("photometry.nonlinear_core_min_px", 3))
+    core_repaired = core_hot >= core_min
+    core_flag = lc.FLAG_NONLINEAR_CORE if core_repaired else 0
+    core_syst = float(cfg.get("photometry.nonlinear_core_syst_mag", 0.05)) \
+        if core_repaired else 0.0
+    common["core_nonlinear_px"] = int(core_hot)
+    common["core_masked_px"] = int(core_masked)
+    common["core_syst_mag"] = core_syst
+    common["flags_base"] = int(common.get("flags_base", 0)) | core_flag
+    if core_repaired:
+        log.info("%s: %d core pixels above the linear ceiling -- flux fitted on "
+                 "the wings", image.meta.path.name, core_hot)
 
     # ---------------------------------------------------------------- direct
     tab = ph.measure_apertures(image, [sn_xy], ap_radius, cfg, annulus_px=annulus)
@@ -829,6 +846,11 @@ def _photometry_row(common: dict, method: str, flux: float, flux_err: float,
     """
     common = dict(common)
     flags = int(flags) | int(common.pop("flags_base", 0))
+    # Reconstructing a compressed core from the wings recovers the flux but not
+    # for free: against an independently built PSF the injection test lands 3-6
+    # per cent low, so carry that as a systematic rather than reporting the
+    # usual hundredth-of-a-magnitude error on a repaired point.
+    core_syst = float(common.pop("core_syst_mag", 0.0) or 0.0)
     exptime = max(image.meta.exptime, 1e-6)
     snr = flux / flux_err if (np.isfinite(flux_err) and flux_err > 0) else np.nan
     detection_snr = float(cfg.get("output.detection_snr", 3.0)) if cfg is not None else 3.0
@@ -841,6 +863,8 @@ def _photometry_row(common: dict, method: str, flux: float, flux_err: float,
         mag = inst + zp.zp
         sys = flux_err_sys if np.isfinite(flux_err_sys) else 0.0
         mag_err = float(np.hypot(1.0857362 * np.hypot(flux_err, sys) / flux, zp.zp_err))
+        if core_syst:
+            mag_err = float(np.hypot(mag_err, core_syst))
         is_limit = False
 
     return lc.new_row(

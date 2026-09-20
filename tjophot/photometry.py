@@ -135,6 +135,29 @@ def measure_apertures(image, positions: Sequence[tuple[float, float]], radius_px
     return out
 
 
+def nonlinear_core(image, x: float, y: float, fwhm_px: float) -> tuple[int, int]:
+    """(pixels at or above the linear ceiling, pixels masked) within 1 FWHM.
+
+    A clean point source returns (0, 0). A compressed core returns tens of
+    pixels, and that -- not the peak value -- is what says how much of the
+    profile had to be reconstructed from the wings. Peak alone cannot tell the
+    two apart: on SN2026aaiv a 50356 ADU peak was a perfect PSF and a 51226 ADU
+    peak was flat over 40 pixels.
+    """
+    level = float(getattr(image.meta, "nonlinear", image.meta.saturation) or
+                  image.meta.saturation)
+    r = max(1, int(round(fwhm_px)))
+    y0, y1 = int(round(y)) - r, int(round(y)) + r + 1
+    x0, x1 = int(round(x)) - r, int(round(x)) + r + 1
+    ny, nx = np.asarray(image.data).shape
+    if y0 < 0 or x0 < 0 or y1 > ny or x1 > nx:
+        return 0, 0
+    sub = np.asarray(image.data)[y0:y1, x0:x1]
+    hot = int(np.sum(np.isfinite(sub) & (sub >= level)))
+    msk = int(np.sum(np.asarray(image.mask)[y0:y1, x0:x1])) if image.mask is not None else 0
+    return hot, msk
+
+
 def curve_of_growth(image, stars: Table, fwhm_px: float, cfg) -> ApCorResult:
     """Median enclosed-flux curve of bright isolated stars, and the aperture
     correction from the science aperture to the 'total' radius."""

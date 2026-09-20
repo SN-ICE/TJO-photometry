@@ -155,6 +155,8 @@ photometry:
   local_bkg: annulus           # annulus | global
   empirical_errors: true       # use blank-aperture scatter as the sky-noise floor
                                # (essential on difference images, whose noise is correlated)
+  nonlinear_core_min_px: 3      # core pixels above the linear ceiling before the epoch is flagged
+  nonlinear_core_syst_mag: 0.05 # systematic magnitude added when the core had to be reconstructed
   psf:
     enabled: true
     oversampling: 1            # TJO is well sampled (FWHM ~5 px); >1 destabilises the EPSF

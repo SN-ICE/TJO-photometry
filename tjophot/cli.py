@@ -433,7 +433,8 @@ def cmd_fetch_template(args) -> int:
 
         reference = tpl.get_reference(stub, cfg, cache_root, coord, [], args.target,
                                       refresh=args.refresh,
-                                      stamp_arcmin=_stamp_for(cfg, index, band))
+                                      stamp_arcmin=_stamp_for(cfg, index, band),
+                                      instrument=instrument)
         if reference is None:
             print(f"{band:>3}: no reference available")
             continue

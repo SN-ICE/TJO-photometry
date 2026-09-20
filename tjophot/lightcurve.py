@@ -22,6 +22,7 @@ COLUMNS = [
     "fwhm_arcsec", "sky_adu", "sky_rms_adu", "exptime", "airmass",
     "astrom_rms_arcsec", "astrom_nstars", "detector", "camera", "pixel_scale", "rebin", "gain_eff", "sky_noise_ratio",
     "pattern_applied", "fringe_scale_adu",
+    "core_nonlinear_px", "core_masked_px",
     "obs_zp", "obs_zp_err", "obs_maglim", "obs_seeing_arcsec",
     "diff_verdict", "diff_dipole_fraction", "diff_dipole_alignment", "diff_quality_nsources",
     "diff_residual_sigma", "diff_target_dipole",
@@ -49,6 +50,7 @@ FLAG_RELAXED_CALIBRATION = 2048  # zero point needed loosened star-selection cut
 FLAG_DIPOLE_RESIDUAL = 4096      # the difference leaves dipoles: the reference is misregistered
 FLAG_KERNEL_SUM = 8192           # kernel sum far from the band's other epochs: the solve collapsed
 FLAG_VARIABLES_UNSCREENED = 16384  # the variable-star screen could not be run for this frame
+FLAG_NONLINEAR_CORE = 32768   # core above the linear range; flux fitted on the wings
 
 FLAG_NAMES = {
     FLAG_MASKED_PIXEL: "masked_pixel", FLAG_SATURATED: "saturated",
@@ -60,6 +62,7 @@ FLAG_NAMES = {
     FLAG_RELAXED_CALIBRATION: "relaxed_calibration",
     FLAG_DIPOLE_RESIDUAL: "dipole_residual", FLAG_KERNEL_SUM: "kernel_sum_outlier",
     FLAG_VARIABLES_UNSCREENED: "variables_unscreened",
+    FLAG_NONLINEAR_CORE: "nonlinear_core",
 }
 
 
@@ -97,6 +100,12 @@ def _suspect(row: dict) -> bool:
     # with an independent reduction -- while giving up host subtraction on M101,
     # which is a real cost the metrics cannot see. The flag stays as an
     # annotation; only a 'fail', which also sets FLAG_BAD_SUBTRACTION, demotes.
+    # A repaired core is fine for a PSF fit, which reconstructs it from the
+    # wings, and useless for an aperture sum, which simply loses those pixels.
+    # So the same epoch is trustworthy by one method and not the other: demote
+    # the aperture rows rather than the epoch.
+    if (flags & FLAG_NONLINEAR_CORE) and str(row.get("method", "")).endswith("aperture"):
+        return True
     return bool(flags & (FLAG_BAD_SUBTRACTION | FLAG_SATURATED | FLAG_IN_TEMPLATE
                          | FLAG_MASKED_PIXEL | FLAG_OFF_IMAGE))
 
