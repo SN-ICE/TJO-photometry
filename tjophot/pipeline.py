@@ -129,8 +129,8 @@ def find_images(cfg, target: str) -> list[Path]:
     2. otherwise every FITS file anywhere under ``data_root`` whose OBJECT
        header names the target, so frames can simply be dropped into the TJO
        folder as they arrive. Files whose name contains the designation (TJO
-       puts it there) are checked first; only if none match is every header
-       read.
+       puts it there) are checked first, then the remaining headers are read
+       so renamed images are included too.
     """
     root = Path(cfg.data_root).expanduser()
     patterns = cfg.get("paths.glob", ["*.fits", "*.fit", "*.fits.gz", "*.fts"])
@@ -162,8 +162,8 @@ def find_images(cfg, target: str) -> list[Path]:
         return normalise_name(value) == wanted
 
     selected = [p for p in by_name if matches(p)]
-    if not selected:
-        selected = [p for p in candidates if p not in by_name and matches(p)]
+    checked = set(by_name)
+    selected.extend(p for p in candidates if p not in checked and matches(p))
     return sorted(selected)
 
 
@@ -602,11 +602,12 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
         if len(fit):
             psf_err = ph.combine_errors(float(fit["flux"][0]), float(fit["flux_err"][0]),
                                         sky_sigma, image.meta.gain)
-            rows.append(_photometry_row(common, "psf", float(fit["flux"][0]),
+            psf_flags = lc.FLAG_BAD_PSF if ph.psf_fit_failed(fit)[0] else 0
+            rows.append(_photometry_row({**common, **_psf_diagnostics(fit)}, "psf", float(fit["flux"][0]),
                                         psf_err, zp, psf_corr, image,
                                         x=float(fit["x"][0]), y=float(fit["y"][0]),
                                         dx=float(fit["dx"][0]), dy=float(fit["dy"][0]),
-                                        flags=int(tab["flags"][0]), limit=limit, cfg=cfg))
+                                        flags=int(tab["flags"][0]) | psf_flags, limit=limit, cfg=cfg))
 
     # ------------------------------------------------------------ difference
     diff = None
@@ -774,14 +775,22 @@ def _difference_rows(diff, image, cfg, coord, common, zp, limit,
             if host_sys > 0 and np.isfinite(ap_flux) and ap_flux > 0:
                 # the same fractional residual, on the PSF (total-flux) scale
                 psf_sys = host_sys * abs(float(fit["flux"][0])) / ap_flux
-            rows.append(_photometry_row({**common, **diff_meta}, "difference_psf",
+            psf_flags = lc.FLAG_BAD_PSF if ph.psf_fit_failed(fit)[0] else 0
+            rows.append(_photometry_row({**common, **diff_meta, **_psf_diagnostics(fit)}, "difference_psf",
                                         float(fit["flux"][0]) / scale,
                                         dpsf_err / scale, zp, psf_corr,
                                         image, x=float(fit["x"][0]), y=float(fit["y"][0]),
                                         dx=float(fit["dx"][0]), dy=float(fit["dy"][0]),
-                                        flags=int(tab["flags"][0]) | bad_subtraction | science_flags,
+                                        flags=int(tab["flags"][0]) | bad_subtraction | science_flags | psf_flags,
                                         limit=limit, flux_err_sys=psf_sys / scale, cfg=cfg))
     return rows
+
+
+def _psf_diagnostics(fit) -> dict:
+    """Keep photutils' diagnostics separate from our own bitmask namespace."""
+    return {"psf_flags": int(fit["psf_flags"][0]) if "psf_flags" in fit.colnames else 0,
+            "psf_qfit": float(fit["qfit"][0]) if "qfit" in fit.colnames else np.nan,
+            "psf_cfit": float(fit["cfit"][0]) if "cfit" in fit.colnames else np.nan}
 
 
 def _matched_fwhm(diff, image) -> float:
@@ -854,6 +863,7 @@ def _photometry_row(common: dict, method: str, flux: float, flux_err: float,
     # per cent low, so carry that as a systematic rather than reporting the
     # usual hundredth-of-a-magnitude error on a repaired point.
     core_syst = float(common.pop("core_syst_mag", 0.0) or 0.0)
+    common["core_syst_mag"] = core_syst  # also needed if calibration is recovered later
     exptime = max(image.meta.exptime, 1e-6)
     snr = flux / flux_err if (np.isfinite(flux_err) and flux_err > 0) else np.nan
     detection_snr = float(cfg.get("output.detection_snr", 3.0)) if cfg is not None else 3.0
@@ -882,43 +892,59 @@ def _photometry_row(common: dict, method: str, flux: float, flux_err: float,
 # --------------------------------------------------------------------------
 # resuming a run
 # --------------------------------------------------------------------------
+def input_fingerprint(path: Path) -> str:
+    """File identity recorded with a successful measurement, not a table write.
+
+    Store nanosecond timestamps as text so CSV floating-point formatting cannot
+    round them. ctime also catches replacements that preserve size and mtime.
+    This is a filesystem signature, not a content checksum.
+    """
+    stat = path.stat()
+    return json.dumps([str(path.resolve()), stat.st_size,
+                       stat.st_mtime_ns, stat.st_ctime_ns])
+
+
 def previous_run(outdir: Path, target: str):
     """What an earlier run of this target left behind.
 
-    Returns ``(table, measured, written_at)``: the photometry table, the set of
-    image names in it, and when it was written. ``(None, set(), 0.0)`` when
-    there is nothing to resume from.
+    Returns ``(table, fingerprints)`` with one stored input signature per image.
+    Legacy or inconsistent signatures are None: those images need remeasuring,
+    since the CSV timestamp cannot establish which input version was measured.
     """
     path = Path(outdir) / f"{target}_photometry_all.csv"
     if not path.exists():
-        return None, set(), 0.0
+        return None, {}
     try:
         table = pd.read_csv(path)
     except Exception as exc:
         log.warning("could not read %s (%s); measuring every frame", path.name, exc)
-        return None, set(), 0.0
+        return None, {}
     if "image" not in table.columns or table.empty:
-        return None, set(), 0.0
-    measured = {str(name) for name in table["image"].dropna()}
-    return table, measured, path.stat().st_mtime
+        return None, {}
+    fingerprints = {}
+    for name, group in table.groupby("image"):
+        values = group.get("input_fingerprint", pd.Series(dtype=object))
+        valid = (len(values) == len(group) and values.notna().all()
+                 and values.nunique() == 1)
+        fingerprints[str(name)] = str(values.iloc[0]) if valid else None
+    return table, fingerprints
 
 
-def pending_epochs(index: Sequence[EpochIndex], measured: set, written_at: float):
+def pending_epochs(index: Sequence[EpochIndex], fingerprints: dict):
     """The epochs that still need measuring, and why the others do not.
 
-    A frame is done when the previous table already holds it *and* the file has
-    not been touched since that table was written -- so a frame the observatory
-    re-reduces is measured again rather than silently keeping the old numbers.
+    Only a matching signature from a successful measurement makes a frame done.
+    Failed attempts and runs restricted to other bands cannot advance it.
     """
     todo, skipped, changed = [], 0, []
     for entry in index:
-        if entry.path.name not in measured:
+        if entry.path.name not in fingerprints:
             todo.append(entry)
             continue
         try:
-            touched = entry.path.stat().st_mtime > written_at
+            touched = input_fingerprint(entry.path) != fingerprints[entry.path.name]
         except OSError:
-            touched = False
+            touched = True
         if touched:
             changed.append(entry.path.name)
             todo.append(entry)
@@ -1158,12 +1184,10 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
     # -- what an earlier run already did -----------------------------------
     if resume is None:
         resume = bool(cfg.get("output.resume", True))
-    existing, measured, written_at = (None, set(), 0.0)
-    if resume or append:
-        existing, measured, written_at = previous_run(outdir, target)
+    existing, fingerprints = previous_run(outdir, target)
     if not resume:
-        measured = set()          # measure everything, but still merge with the old table
-    todo, skipped, changed = pending_epochs(index, measured, written_at)
+        fingerprints = {}        # measure everything, but preserve unselected epochs
+    todo, skipped, changed = pending_epochs(index, fingerprints)
     if skipped or changed:
         log.info("%d of %d frames were measured before and are unchanged; %d to do%s",
                  skipped, len(index), len(todo),
@@ -1180,7 +1204,7 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
     # whatever epochs exist now, so adding a night would shift the adopted
     # position by a fraction of an arcsecond -- and old and new rows would sit in
     # one table measured at two different places.
-    if resume and not explicit and str(cfg.get("target.resolve", "auto")).lower() != "always" \
+    if existing is not None and not explicit and str(cfg.get("target.resolve", "auto")).lower() != "always" \
             and str(cfg.get("target.refine", "auto")).lower() != "always":
         earlier = previous_coord(outdir, target)
         if earlier is not None:
@@ -1249,6 +1273,7 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
     for k, entry in enumerate(todo, 1):
         log.info("[%d/%d] %s", k, len(todo), entry.path.name)
         try:
+            fingerprint = input_fingerprint(entry.path)
             image = prepare_image(entry.path, cfg, instrument,
                                   pattern=pattern_for(patterns, entry.band, entry.detector),
                                   astrometry_ref=astrometry_ref)
@@ -1263,9 +1288,14 @@ def run(cfg, target: str, bands: Optional[Sequence[str]] = None,
                                    "centre is %.1f arcmin away (%s)" % (
                                        centre.separation(coord).arcmin,
                                        centre.to_string("hmsdms", precision=0)))
-            rows.extend(process_image(image, cfg, coord, cache_root,
-                                      references.get(entry.band), outdir, target,
-                                      refresh=refresh))
+            measured_rows = process_image(image, cfg, coord, cache_root,
+                                          references.get(entry.band), outdir, target,
+                                          refresh=refresh)
+            if input_fingerprint(entry.path) != fingerprint:
+                raise RuntimeError("input changed while being measured; retry this image")
+            for row in measured_rows:
+                row["input_fingerprint"] = fingerprint
+            rows.extend(measured_rows)
         except Exception as exc:
             log.error("%s failed: %s", entry.path.name, exc)
             failures.append({"image": entry.path.name, "error": str(exc)})

@@ -209,7 +209,8 @@ def _transfer_one(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
     ensure = {"zp_source": "", "cal_provider": "", "is_limit": False, "flags": 0,
               "mag_offset": np.nan, "snr": np.nan, "mag": np.nan, "mag_err": np.nan,
               "limit_mag": np.nan, "flux": np.nan, "flux_err": np.nan,
-              "flux_err_sys": np.nan, "apcor": np.nan, "sky_rms_adu": np.nan,
+              "flux_err_sys": np.nan, "core_syst_mag": np.nan,
+              "apcor": np.nan, "sky_rms_adu": np.nan,
               "aperture_radius_px": np.nan, "exptime": np.nan}
     for column, fill in ensure.items():
         if column not in frame.columns:
@@ -263,7 +264,7 @@ def _transfer_one(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
         # and fought pandas' dtype inference on every write.
         snapshot = frame.loc[index]
         new = {name: list(snapshot[name]) for name in
-               ("flags", "snr", "mag", "mag_err", "is_limit", "limit_mag")}
+               ("flags", "snr", "mag", "mag_err", "is_limit", "limit_mag", "core_syst_mag")}
         for k, row_index in enumerate(index):
             row = snapshot.loc[row_index]
             offset_mag = row.get("mag_offset", np.nan)
@@ -279,6 +280,19 @@ def _transfer_one(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
                     new["flags"][k] = int(new["flags"][k]) | lc.FLAG_APPROX_OFFSET
                     report["approximate_offset"] += 1
 
+            core_syst = row.get("core_syst_mag", np.nan)
+            if not np.isfinite(core_syst) or core_syst < 0:
+                core_syst = 0.0
+                if int(new["flags"][k]) & lc.FLAG_NONLINEAR_CORE:
+                    # Older tables did not persist the measured systematic.
+                    # Use the configured value, explicitly warning that it is
+                    # an estimate; newly measured rows preserve their own value.
+                    core_syst = float(cfg.get("photometry.nonlinear_core_syst_mag", 0.05)) \
+                        if cfg is not None else 0.05
+                    log.warning("%s %s: no stored nonlinear-core uncertainty; "
+                                "using configured %.3f mag (remeasure for exact provenance)",
+                                image, row["method"], core_syst)
+            new["core_syst_mag"][k] = core_syst
             flux, flux_err = row.get("flux", np.nan), row.get("flux_err", np.nan)
             snr = flux / flux_err if (np.isfinite(flux_err) and flux_err > 0) else np.nan
             new["snr"][k] = snr
@@ -287,7 +301,7 @@ def _transfer_one(frame: pd.DataFrame, cfg=None, min_nights: int = 3,
                 sys = row.get("flux_err_sys", 0.0)
                 sys = float(sys) if sys is not None and np.isfinite(sys) else 0.0
                 new["mag_err"][k] = float(np.hypot(
-                    1.0857362 * np.hypot(flux_err, sys) / flux, zp_err))
+                    np.hypot(1.0857362 * np.hypot(flux_err, sys) / flux, zp_err), core_syst))
                 new["is_limit"][k] = False
             else:
                 new["mag"][k] = np.nan

@@ -704,16 +704,15 @@ def test_previous_run_reads_back_what_was_measured(tmp_path):
     from tjophot.pipeline import previous_run
 
     _write_table(tmp_path, "SN2026abwp", ["a.fits", "b.fits"])
-    table, measured, written_at = previous_run(tmp_path, "SN2026abwp")
-    assert measured == {"a.fits", "b.fits"}
+    table, fingerprints = previous_run(tmp_path, "SN2026abwp")
+    assert fingerprints == {"a.fits": None, "b.fits": None}
     assert len(table) == 2
-    assert written_at > 0
 
 
 def test_previous_run_on_a_fresh_target(tmp_path):
     from tjophot.pipeline import previous_run
 
-    assert previous_run(tmp_path, "SN2026abwp") == (None, set(), 0.0)
+    assert previous_run(tmp_path, "SN2026abwp") == (None, {})
 
 
 def test_previous_run_survives_a_truncated_table(tmp_path):
@@ -721,24 +720,24 @@ def test_previous_run_survives_a_truncated_table(tmp_path):
     from tjophot.pipeline import previous_run
 
     (tmp_path / "SN2026abwp_photometry_all.csv").write_text("")
-    assert previous_run(tmp_path, "SN2026abwp")[1] == set()
+    assert previous_run(tmp_path, "SN2026abwp")[1] == {}
 
 
 def test_previous_run_ignores_a_table_with_no_image_column(tmp_path):
     from tjophot.pipeline import previous_run
 
     (tmp_path / "SN2026abwp_photometry_all.csv").write_text("mjd,mag\n61300.0,19.0\n")
-    assert previous_run(tmp_path, "SN2026abwp") == (None, set(), 0.0)
+    assert previous_run(tmp_path, "SN2026abwp") == (None, {})
 
 
 def test_pending_epochs_skips_what_is_already_done(tmp_path):
-    from tjophot.pipeline import pending_epochs
+    from tjophot.pipeline import input_fingerprint, pending_epochs
 
     for name in ("a.fits", "b.fits", "c.fits"):
         (tmp_path / name).write_text("x")
-    written_at = max((tmp_path / n).stat().st_mtime for n in ("a.fits", "b.fits")) + 10
+    fingerprints = {n: input_fingerprint(tmp_path / n) for n in ("a.fits", "b.fits")}
     index = [_epoch(tmp_path / n) for n in ("a.fits", "b.fits", "c.fits")]
-    todo, skipped, changed = pending_epochs(index, {"a.fits", "b.fits"}, written_at)
+    todo, skipped, changed = pending_epochs(index, fingerprints)
     assert [e.path.name for e in todo] == ["c.fits"]
     assert skipped == 2
     assert changed == []
@@ -751,17 +750,18 @@ def test_pending_epochs_remeasures_a_frame_the_observatory_re_reduced(tmp_path):
     version that no longer exists.
     """
     import os
-    from tjophot.pipeline import pending_epochs
+    from tjophot.pipeline import input_fingerprint, pending_epochs
 
     old = tmp_path / "old.fits"
     fresh = tmp_path / "fresh.fits"
     old.write_text("x")
     fresh.write_text("x")
-    written_at = old.stat().st_mtime + 10
-    os.utime(fresh, (written_at + 100, written_at + 100))   # re-reduced since
+    fingerprints = {p.name: input_fingerprint(p) for p in (old, fresh)}
+    changed_at = fresh.stat().st_mtime + 100
+    os.utime(fresh, (changed_at, changed_at))   # re-reduced since
 
     index = [_epoch(old), _epoch(fresh)]
-    todo, skipped, changed = pending_epochs(index, {"old.fits", "fresh.fits"}, written_at)
+    todo, skipped, changed = pending_epochs(index, fingerprints)
     assert [e.path.name for e in todo] == ["fresh.fits"]
     assert skipped == 1
     assert changed == ["fresh.fits"]
@@ -771,7 +771,7 @@ def test_pending_epochs_does_everything_when_there_is_no_table(tmp_path):
     from tjophot.pipeline import pending_epochs
 
     index = [_epoch(tmp_path / "a.fits"), _epoch(tmp_path / "b.fits")]
-    todo, skipped, changed = pending_epochs(index, set(), 0.0)
+    todo, skipped, changed = pending_epochs(index, {})
     assert len(todo) == 2 and skipped == 0 and changed == []
 
 

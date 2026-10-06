@@ -306,9 +306,54 @@ tjophot run snname --skip 40 --append  # resume a long run, merging into the tab
 tjophot colorterms snname              # fit the instrument colour terms
 ```
 
-`--append` merges a run into an existing table instead of replacing it, keyed on
-(image, method), so you can redo one band or resume after an interruption
-without losing the rest. `--skip N` starts from the Nth epoch.
+Runs merge into the existing table automatically; `--append` remains accepted
+for compatibility. `--no-resume` remeasures the selected images while preserving
+unselected epochs, including with `--bands`, `--skip` and `--max-images`.
+Each successfully remeasured image replaces all its old methods, so a failed
+subtraction or PSF fit cannot leave an obsolete measurement as primary.
+If the entire image fails, its old rows remain and its changed input is retried
+on the next run. `--skip N` skips the first N epochs.
+
+Resuming compares each input with the `input_fingerprint` saved on its last
+successful measurement: resolved path, size, and nanosecond modification and
+change times. Rewriting another band's outputs does not mark an unmeasured
+input as current. An input changed during processing is retried. Older tables
+without these fingerprints need one remeasurement of each selected image;
+unchanged images are skipped after that. This is a filesystem signature, not
+a content checksum. Use `--no-resume` after changing measurement code, or clean
+the outputs before changing the measurement configuration.
+
+Automatic selection prefers a clean difference-image upper limit over a direct
+detection, which may be host light. Within difference methods, detections remain
+preferred to upper limits; an explicit `output.primary_method` still overrides
+automatic selection. The host guard only restores differences carrying a dipole
+warning with an acceptable kernel fit. Masked/off-image measurements, failed
+PSF fits and nonlinear-core aperture sums cannot qualify. A valid PSF fit of a
+reconstructed core can qualify; its extra uncertainty is retained.
+
+Unsuccessful PSF fits and fits with invalid positions, fluxes or uncertainties
+carry `bad_psf` (bit 65536, distinct from `nonlinear_core`). They cannot outrank
+clean alternatives or set the PSF-to-aperture correction. The full table retains
+`psf_flags`, `psf_qfit` and `psf_cfit`; these are the raw photutils diagnostics,
+separate from the pipeline flags. Negative forced flux alone remains a valid
+nondetection. Regression tests run offline with `python -m pytest -q`.
+
+The full table also records `core_syst_mag`, the nonlinear-core uncertainty
+actually used at measurement time. Zero-point transfer adds this saved value in
+quadrature, including when the current configuration has changed. For older
+flagged rows without it, transfer uses the configured value (default 0.05 mag)
+and warns that this is an estimate; remeasurement supplies exact provenance.
+
+Blank-aperture noise and depth use Gaussian-calibrated median absolute
+deviations without percentile trimming. Apertures overlapping positive or
+negative sources detected in a smoothed image, masked pixels, or missing data
+are rejected. Too few complete apertures yield unknown empirical noise; depth
+falls back to its analytic estimate. Use `--no-resume` to apply the new noise
+estimates to previously measured images.
+
+Image discovery checks remaining FITS headers even after finding filename
+matches, so renamed target exposures are included. The CLI honors
+`output.resume: false`; `--no-resume` explicitly disables resume for one run.
 
 `tjophot colorterms` runs the calibration over many frames and prints the
 weighted mean colour term per band, already formatted as YAML to paste into a

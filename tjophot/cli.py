@@ -71,7 +71,7 @@ def cmd_run(args) -> int:
     result = pipeline.run(cfg, args.target, bands=args.bands, max_images=args.max_images,
                           refresh=args.refresh, skip_subtraction=args.no_subtraction,
                           append=args.append, skip=args.skip,
-                          resume=not getattr(args, "no_resume", False))
+                          resume=False if getattr(args, "no_resume", False) else None)
     print(f"outputs in {result['outdir']}")
     return 0
 

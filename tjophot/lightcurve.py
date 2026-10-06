@@ -22,13 +22,14 @@ COLUMNS = [
     "fwhm_arcsec", "sky_adu", "sky_rms_adu", "exptime", "airmass",
     "astrom_rms_arcsec", "astrom_nstars", "detector", "camera", "pixel_scale", "rebin", "gain_eff", "sky_noise_ratio",
     "pattern_applied", "fringe_scale_adu",
-    "core_nonlinear_px", "core_masked_px",
+    "core_nonlinear_px", "core_masked_px", "core_syst_mag",
     "obs_zp", "obs_zp_err", "obs_maglim", "obs_seeing_arcsec",
     "diff_verdict", "diff_dipole_fraction", "diff_dipole_alignment", "diff_quality_nsources",
     "diff_residual_sigma", "diff_target_dipole",
     "inject_limit_mag", "inject_limit_err", "inject_sites", "error_scale",
     "ref_source", "ref_band", "ref_nimages", "diff_mode", "diff_chi2", "diff_kernel_sum", "diff_nstamps", "diff_kernel_dx", "diff_kernel_dy", "diff_host_residual", "diff_host_nsites",
-    "x", "y", "dx", "dy", "flags", "quality", "image",
+    "x", "y", "dx", "dy", "psf_flags", "psf_qfit", "psf_cfit",
+    "flags", "quality", "image", "input_fingerprint",
 ]
 
 # Order in which methods are preferred when output.primary_method is 'auto'.
@@ -52,6 +53,8 @@ FLAG_KERNEL_SUM = 8192           # kernel sum far from the band's other epochs: 
 FLAG_VARIABLES_UNSCREENED = 16384  # the variable-star screen could not be run for this frame
 FLAG_NONLINEAR_CORE = 32768   # core above the linear range; flux fitted on the wings
 
+FLAG_BAD_PSF = 65536         # failed fit or unusable parameter uncertainty
+
 FLAG_NAMES = {
     FLAG_MASKED_PIXEL: "masked_pixel", FLAG_SATURATED: "saturated",
     FLAG_OFF_IMAGE: "off_image", FLAG_BAD_SUBTRACTION: "bad_subtraction",
@@ -63,6 +66,7 @@ FLAG_NAMES = {
     FLAG_DIPOLE_RESIDUAL: "dipole_residual", FLAG_KERNEL_SUM: "kernel_sum_outlier",
     FLAG_VARIABLES_UNSCREENED: "variables_unscreened",
     FLAG_NONLINEAR_CORE: "nonlinear_core",
+    FLAG_BAD_PSF: "bad_psf",
 }
 
 
@@ -107,7 +111,7 @@ def _suspect(row: dict) -> bool:
     if (flags & FLAG_NONLINEAR_CORE) and str(row.get("method", "")).endswith("aperture"):
         return True
     return bool(flags & (FLAG_BAD_SUBTRACTION | FLAG_SATURATED | FLAG_IN_TEMPLATE
-                         | FLAG_MASKED_PIXEL | FLAG_OFF_IMAGE))
+                         | FLAG_MASKED_PIXEL | FLAG_OFF_IMAGE | FLAG_BAD_PSF))
 
 
 # A direct measurement brighter than the same epoch's difference measurement by
@@ -132,7 +136,12 @@ def _host_guard_candidate(row: dict, max_chi2: float = 2.5) -> bool:
         chi2 = float(row.get("diff_chi2", np.nan))
     except (TypeError, ValueError):
         return False
-    if flags & (FLAG_KERNEL_SUM | FLAG_CROSS_BAND_TEMPLATE | FLAG_SATURATED | FLAG_IN_TEMPLATE):
+    if flags & (FLAG_KERNEL_SUM | FLAG_CROSS_BAND_TEMPLATE | FLAG_SATURATED
+                | FLAG_IN_TEMPLATE | FLAG_BAD_PSF | FLAG_MASKED_PIXEL | FLAG_OFF_IMAGE):
+        return False
+    if flags & FLAG_NONLINEAR_CORE and str(row["method"]).endswith("aperture"):
+        return False
+    if not flags & FLAG_DIPOLE_RESIDUAL:
         return False
     if not (np.isfinite(chi2) and chi2 <= max_chi2):
         return False
@@ -172,11 +181,19 @@ def choose_primary(rows: Sequence[dict], preference: str = "auto",
             if row["method"] == preference:
                 return row
 
+    # A valid subtraction nondetection must not turn into a host detection.
+    clean_differences = [
+        r for r in usable
+        if str(r["method"]).startswith("difference") and not _suspect(r)
+        and (np.isfinite(r.get("mag", np.nan))
+             or (r.get("is_limit") and np.isfinite(r.get("limit_mag", np.nan))))
+    ]
+    candidates = clean_differences or usable
     chosen = None
     for allow_suspect in (False, True):
         for require_detection in (True, False):
             for method in METHOD_PRIORITY:
-                for row in usable:
+                for row in candidates:
                     if row["method"] != method:
                         continue
                     if not allow_suspect and _suspect(row):
@@ -238,13 +255,15 @@ def to_frame(rows: Iterable[dict]) -> pd.DataFrame:
 def merge(existing: pd.DataFrame, new: pd.DataFrame,
           preference: str = "auto",
           host_guard_mag: Optional[float] = HOST_GUARD_MAG) -> pd.DataFrame:
-    """Combine a previous run's table with new rows, newest measurement wins.
+    """Replace all old methods for each successfully remeasured image.
 
     The primary flag is recomputed per image afterwards: the two runs each
-    chose one, and after merging only one may stand.
+    chose one, and after merging only one may stand. Unselected images are
+    retained, but methods missing from a remeasurement must not survive.
     """
     keys = ["image", "method"]
-    combined = pd.concat([existing, new], ignore_index=True)
+    retained = existing[~existing["image"].isin(new["image"])]
+    combined = pd.concat([retained, new], ignore_index=True)
     combined = combined.drop_duplicates(subset=keys, keep="last")
     combined = combined.sort_values(["band", "mjd", "method"]).reset_index(drop=True)
     return reselect_primary(combined, preference, host_guard_mag)
