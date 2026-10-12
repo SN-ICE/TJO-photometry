@@ -74,7 +74,7 @@ def protect_mask(data: np.ndarray, saturation: float, nsigma: float = 5.0,
 
 def remove(data: np.ndarray, cfg, gain: float, readnoise: float,
            saturation: float, fwhm_px: float,
-           extra_mask: Optional[np.ndarray] = None):
+           extra_mask: Optional[np.ndarray] = None, pedestal: float = 0.0):
     """Return ``(cleaned, cosmic_ray_mask, info)``.
 
     On any failure the frame comes back untouched with an empty mask: a missing
@@ -103,6 +103,10 @@ def remove(data: np.ndarray, cfg, gain: float, readnoise: float,
 
     finite = np.isfinite(data)
     work = np.where(finite, data, float(np.nanmedian(data[finite])) if finite.any() else 0.0)
+    # The noise detect_cosmics expects at a pixel comes from that pixel's level,
+    # so a level that includes a non-photon pedestal overstates it everywhere.
+    pedestal = float(pedestal or 0.0)
+    work = work - pedestal
     # detect_cosmics multiplies the frame by the gain and works in electrons
     # throughout, and its satlevel is compared against that electron-scale
     # array (astroscrappy.pyx: `cleanarr = indat * gain`, then
@@ -115,7 +119,7 @@ def remove(data: np.ndarray, cfg, gain: float, readnoise: float,
         crmask, cleaned = astroscrappy.detect_cosmics(
             work.astype(np.float32), inmask=keep,
             gain=gain_e, readnoise=float(readnoise) or 0.0,
-            satlevel=float(saturation) * gain_e,
+            satlevel=(float(saturation) - pedestal) * gain_e,
             sigclip=float(cfg.get("image.cosmic_rays.sigclip", 4.5)),
             sigfrac=float(cfg.get("image.cosmic_rays.sigfrac", 0.3)),
             objlim=float(cfg.get("image.cosmic_rays.objlim", 10.0)),
@@ -142,7 +146,7 @@ def remove(data: np.ndarray, cfg, gain: float, readnoise: float,
         from scipy.ndimage import binary_dilation
         crmask = binary_dilation(crmask, iterations=grow)
 
-    out = np.asarray(cleaned, dtype=float)
+    out = np.asarray(cleaned, dtype=float) + pedestal
     out[~finite] = np.nan
     info.update(cosmic_rays=int(crmask.sum()), cosmic_ray_fraction=float(crmask.mean()),
                 applied=True)

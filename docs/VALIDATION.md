@@ -196,54 +196,64 @@ Two problems this turned up:
 
 ## The gain model
 
-The header's `GAIN = 1.04` e-/ADU with `RDNOISE = 9.0` e- does not describe the
-frames that arrive. Measured two independent ways on MEIA2:
+The header's `GAIN = 1.04` e-/ADU with `RDNOISE = 9.0` e- does not describe
+the frames TJO delivers. That much has held up; the first account of *why*,
+written here earlier, did not, and is corrected below.
 
-- **Pixel-to-pixel scatter.** Adjacent-column differences over the central half
-  of a frame, divided by sqrt(2). On a B frame with sky 147 ADU this gives 7.1
-  ADU where the header values predict 14.7. The noise is white: the direct
-  patch scatter agrees to 1 per cent (7.10 vs 7.14), and block-averaging falls
-  as 1/n through 16x16 (7.11, 3.55, 1.79, 0.94, 0.53 against 7.11, 3.56, 1.78,
-  0.89, 0.44 for white noise). So this is a real noise measurement, not
-  small-scale smoothing.
-- **Differencing pairs of frames of the same field.** Integer-pixel shifts only,
-  so nothing is interpolated; the difference cancels the flat residual, the
-  fringe pattern and the field itself, leaving var(f1-f2) = var1 + var2. Over
-  107 pairs from three targets the per-frame sky sigma comes out at 6.9 ADU in
-  B at sky 136 -- the same answer as the pixel-to-pixel estimate.
+**What was measured.** Pixel variance (from second differences, which remove
+gradients and fringe-scale structure) against sky level, on 42 MEIA2 frames
+in six filters spanning a lunar cycle, so the sky runs from 135 ADU on a dark
+night to 6886 ADU under the full moon. One line fits all of them to a few per
+cent:
 
-Both give an effective gain near 2.9-3.5 e-/ADU and a read-noise term that is
-negligible, not 9 e-. A factor of ~2.8 in variance with the read noise gone is
-what averaging about three sub-exposures looks like, and the full-well argument
-agrees: field stars clip at ~64000 ADU, which is 67000 e- at gain 1.04 and an
-implausible 190000 e- at gain 2.9. So the physical gain is probably right and
-the delivered frames are averages. The headers say nothing about it: no
-`NCOMBINE`, a single `DATE-OBS`, `EXPTIME = 200`, `IMAGEID = 1`.
+    sigma^2 = S / 1.95  -  21 ADU^2  +  (0.0041 S)^2
 
-The pipeline now solves each frame's own sky for the gain its Poisson errors
-need (`image.measure_gain`, bounded by `image.gain_bounds`) and uses that for
-the error map, `combine_errors` and the cosmic-ray detector. Caveats:
+- **Gain 1.95 +- 0.03 e-/ADU**, and the same in every filter fitted on its
+  own: B 1.95, V 1.96, g 1.94, r 1.95. A camera property, not a sky effect.
+- **Offset -21 +- 2 ADU^2.** A clean bias-subtracted frame gives +rn^2/g^2,
+  never a negative number. Negative means the "sky" carries an additive
+  pedestal that makes no shot noise: 41 ADU with no read noise, 83 ADU with
+  the header's 9 e-. The sky alone cannot split the two, and nothing in the
+  pipeline needs it split -- local backgrounds remove the pedestal from every
+  flux, and the noise prediction depends only on the line.
+- **0.41 per cent pixel-to-pixel flat noise**, visible only above ~4000 ADU.
+  Over a stellar footprint it averages down to ~0.05 per cent of the flux, so
+  it is left out of the error model.
 
-- Fringing and flat residual add variance at high sky, which drags the
-  solution down -- 3.5 in B, 2.5 in z on the same camera and the same night.
-  This is the effective gain of *that frame*, fit for an error bar and not a
-  measurement of the detector.
-- With the header read noise kept in the solve, the answer lands ~15 per cent
-  above the pure-Poisson reading (3.35 vs 2.92 in B). The pair fit prefers the
-  latter but its intercept is contaminated at high sky, so the truth sits
-  somewhere in that range. Against a term that was 180 per cent wrong, 15 per
-  cent is not worth agonising over.
+**Cross-check.** Two B frames taken 3.4 minutes apart give the temporal noise
+at the sky with the flat cancelled: 39-44 ADU^2 at 134-139 ADU. Shot noise
+alone at the header gain would be 133 ADU^2, so 1.04 cannot describe a single
+frame whatever the read noise. The same pair shows 4-16 ADU^2 of fixed-pattern
+noise on top, varying from night to night -- calibration masters, most likely.
+It is real noise in one frame and the measured `bkg_rms` already carries it.
 
-What this does **not** affect: the difference image's chi-square, the limiting
-magnitudes and every sky-dominated error bar. Those are built from the measured
-`bkg_rms`, never from the gain, so they were right all along. The gain enters
-only the source's own Poisson term, which matters for bright stars (and so for
-the zero-point fit's weights) and for L.A.Cosmic's threshold.
+**What was wrong before.** The first version solved each frame's own sky for
+the gain: sigma^2 = sky/g + (rn/g)^2 at a single level. At one level a gain
+and a pedestal are degenerate, so with the pedestal ignored the answer came out
+2.9-3.6 e-/ADU on dark nights and ~1.9 under the moon, falling with sky
+brightness -- which is also why it fell from B to z. The "average of about
+three sub-exposures" reading drawn from that was an artefact: averaging scales
+the slope and the intercept together and can never make the intercept
+negative. The full-well check now agrees with no averaging at all: stars clip
+near 64000 ADU, which is ~125000 e- at 1.95.
 
-Cosmic-ray rejection does get stricter -- 0.018 to 0.128 per cent of pixels in
-B -- because the detector had been expecting twice the noise. Checked against
-335 Gaia positions in two bands: no stellar core is touched and no star's flux
-moves, at either gain. The sources that lose most of their flux under the new
-threshold are 1-2 pixels across and absent from Gaia, which is what a cosmic
-ray looks like.
+**What the code does now.** The per-frame solve is gone. The instrument file
+carries the measured `noise_model` (gain, offset_adu2), which wins over the
+header. A negative offset is represented as a pedestal with zero read noise,
+which reproduces the same line at every level: the error map and
+`combine_errors` use the gain; L.A.Cosmic is handed the frame with the
+pedestal taken off, so its threshold tracks the true noise at every level;
+and the sky-noise check predicts with the pedestal removed. On the 42 frames
+that check reads 0.997 median (0.94-1.17), against ~0.47 with the header.
 
+**Where it matters.** Only the source's own shot noise. The sky term of every
+error bar comes from the measured `bkg_rms`, so faint-source errors, the
+difference chi-square and the limiting magnitudes were never affected. The
+header model overstated a bright source's shot-noise variance by 1.9x; the
+per-frame solve understated it by up to 1.75x on dark nights and less under
+the moon. Neither moves a magnitude, and on a bright target the zero-point
+term dominates the error regardless.
+
+**Not measured:** MEIA3. Its instrument file still uses the header values,
+and the sky-noise check will say so if they are wrong. Measuring it needs
+frames across a range of sky levels -- moonlit nights give the leverage.

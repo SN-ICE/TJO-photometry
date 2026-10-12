@@ -24,8 +24,18 @@ header:
   quality: [IMGQS]
 
 defaults:
-  gain: 1.04
+  gain: 1.04                   # header value; superseded by noise_model below
   readnoise: 9.0
+  # Measured on the delivered frames: pixel variance against sky level over 42
+  # frames, six filters, dark sky to full moon (135-6886 ADU). One straight
+  # line fits them all to a few per cent, and fitted per filter alone the slope
+  # gives the same gain in B, V, g and r (1.94-1.96). The header's GAIN=1.04
+  # and RDNOISE=9 predict three times the variance seen on a dark night.
+  # The offset is negative, so the "sky" carries a non-photon pedestal of
+  # 41 ADU (no read noise) to 83 ADU (9 e-); the sky alone cannot separate them.
+  noise_model:
+    gain: 1.95                 # e- per ADU, +-0.03
+    offset_adu2: -21.0         # sigma^2 = S/gain + offset, +-2
   pixel_scale: 0.36            # arcsec/px, unbinned; only used if WCS is absent
   saturation_adu: 55000
   # Measured on SN2026aaiv: point-source cores go flat between 50000 and 54000

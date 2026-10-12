@@ -77,14 +77,10 @@ image:
   # `nonlinear_adu` when the turnover has actually been measured.
   nonlinear_frac: 0.87
   nonlinear_adu: null
-  # Solve the frame's own sky for the gain that its Poisson error bars need,
-  # instead of trusting the header. What arrives has been through the data
-  # centre: on MEIA2 the delivered sky is ~2.8x quieter in variance than
-  # GAIN=1.04 with RDNOISE=9 allows, which is what averaging about three
-  # sub-exposures looks like. Outside these bounds the header value is kept
-  # and the mismatch is logged.
-  measure_gain: true
-  gain_bounds: [0.3, 10.0]
+  # The gain and read noise come from the frame header unless the instrument
+  # file carries a measured `noise_model` (gain, offset_adu2), which wins. A
+  # header can be wrong for the frames a data centre delivers: on MEIA2 it is,
+  # by a factor of 1.9. See docs/VALIDATION.md, "The gain model".
   # Ignore this border when detecting and calibrating. In arcsec so it means
   # the same patch of sky at any binning; edge_margin_px still works if set.
   edge_margin_arcsec: 9.0
