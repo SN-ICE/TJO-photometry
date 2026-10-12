@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 import warnings
 from pathlib import Path
@@ -158,15 +159,22 @@ def _sep_arcsec(ra1: float, dec1: float, ra2: float, dec2: float) -> float:
 def resolve_reuse_arcsec(value, radius_arcmin: float) -> float:
     """How far off centre a cached catalogue may be and still be reused.
 
-    ``auto`` is a fifth of the search radius. The radius is already sized with
-    margin over the frame's half-diagonal, so giving up the outer fifth still
-    leaves every star the calibration actually reaches. Set it to 0, ``off`` or
-    ``none`` to require an exact grid hit.
+    ``auto`` is 35 per cent of the search radius -- 3.5 arcmin on a 10 arcmin
+    field, which is the scale TJO dithers on.
+
+    A fifth was too tight. The radius is sized to just contain the frame, so
+    strict corner-to-corner coverage would allow almost no offset at all, and
+    0.2 was already a compromise in that direction; on SN2026adfq it rejected a
+    cached cone 135 arcsec away by fifteen arcseconds and queued a fresh Gaia
+    job per pointing. A zero point is a constant fitted to a hundred-odd stars,
+    so losing the frame's outer edge costs a few of them, while a cache miss
+    costs minutes -- or, when the archive is unwell, the whole run. Trade the
+    edge. Set it to 0, ``off`` or ``none`` to require an exact grid hit.
     """
     if value in (None, False) or str(value).strip().lower() in ("off", "none", "false"):
         return 0.0
     if str(value).strip().lower() == "auto":
-        return 0.2 * float(radius_arcmin) * 60.0
+        return 0.35 * float(radius_arcmin) * 60.0
     return max(float(value), 0.0)
 
 
@@ -226,10 +234,71 @@ _GAIA_JKC = {"U": "u_jkc", "B": "b_jkc", "V": "v_jkc", "R": "r_jkc", "I": "i_jkc
 _GAIA_SDSS = {"u": "u_sdss", "g": "g_sdss", "r": "r_sdss", "i": "i_sdss", "z": "z_sdss"}
 
 
+# How long to wait for a Gaia TAP job before giving up and letting the next
+# provider have a go. `launch_job_async(...).get_results()` polls the archive
+# until the job finishes, with no deadline at all, so a job that never leaves
+# the queue stops the whole run with no further output -- which is exactly what
+# the archive's own DR4-migration banner warns can happen.
+GAIA_TIMEOUT_S = 300.0
+
+
+def set_gaia_timeout(seconds) -> None:
+    global GAIA_TIMEOUT_S
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return
+    if value > 0:
+        GAIA_TIMEOUT_S = value
+
+
+def _run_gaia_job(adql: str, row_limit: int) -> Table:
+    """Submit an async TAP job and wait for it, but not forever."""
+    import time
+    from astroquery.gaia import Gaia
+
+    timeout = float(os.environ.get("TJOPHOT_GAIA_TIMEOUT", GAIA_TIMEOUT_S) or GAIA_TIMEOUT_S)
+    previous_limit = Gaia.ROW_LIMIT
+    job = None
+    try:
+        Gaia.ROW_LIMIT = row_limit
+        job = Gaia.launch_job_async(adql, background=True)
+        deadline = time.monotonic() + timeout
+        phase = ""
+        while True:
+            try:
+                phase = str(job.get_phase(update=True) or "").upper()
+            except Exception as exc:
+                raise CatalogError(f"Gaia job status unreadable: {exc}") from exc
+            if phase in ("COMPLETED", "ERROR", "ABORTED"):
+                break
+            if time.monotonic() >= deadline:
+                log.warning("Gaia job still %s after %.0fs; giving up on it",
+                            phase or "PENDING", timeout)
+                try:
+                    job.abort()
+                except Exception:
+                    pass
+                raise CatalogError(
+                    f"Gaia archive did not answer within {timeout:.0f}s "
+                    f"(job phase {phase or 'PENDING'})")
+            time.sleep(5.0)
+        if phase != "COMPLETED":
+            detail = ""
+            try:
+                detail = str(job.get_error() or "")
+            except Exception:
+                pass
+            raise CatalogError(f"Gaia job ended in phase {phase}"
+                               + (f": {detail}" if detail else ""))
+        return job.get_results()
+    finally:
+        Gaia.ROW_LIMIT = previous_limit
+
+
 def fetch_gaia_synth(ra: float, dec: float, radius_arcmin: float,
                      row_limit: int = 20000) -> Table:
     """Gaia DR3 synthetic photometry (GSPC) joined to gaia_source for positions."""
-    from astroquery.gaia import Gaia
 
     prefixes = list(_GAIA_JKC.values()) + list(_GAIA_SDSS.values())
     cols = ["g.source_id", "g.ra", "g.dec", "g.phot_g_mean_mag", "g.bp_rp"]
@@ -244,12 +313,7 @@ def fetch_gaia_synth(ra: float, dec: float, radius_arcmin: float,
         f"CIRCLE('ICRS', {ra:.7f}, {dec:.7f}, {radius_arcmin / 60.0:.7f}))"
     )
     log.info("querying Gaia DR3 GSPC around %.5f %+.5f (r=%.1f')", ra, dec, radius_arcmin)
-    previous_limit = Gaia.ROW_LIMIT
-    try:
-        Gaia.ROW_LIMIT = row_limit
-        raw = Gaia.launch_job_async(adql).get_results()
-    finally:
-        Gaia.ROW_LIMIT = previous_limit
+    raw = _run_gaia_job(adql, row_limit)
     if raw is None or len(raw) == 0:
         raise CatalogError("Gaia GSPC returned no sources")
 
@@ -298,7 +362,6 @@ def fetch_gaia_astrometry(ra: float, dec: float, radius_arcmin: float,
     handful of high-proper-motion stars at most, and the sigma clipping in the
     fit removes them anyway.
     """
-    from astroquery.gaia import Gaia
 
     adql = (
         "SELECT source_id, ra, dec, pmra, pmdec, phot_g_mean_mag, "
@@ -310,12 +373,7 @@ def fetch_gaia_astrometry(ra: float, dec: float, radius_arcmin: float,
     )
     log.info("querying Gaia DR3 positions around %.5f %+.5f (r=%.1f', G < %.1f)",
              ra, dec, radius_arcmin, max_mag)
-    previous_limit = Gaia.ROW_LIMIT
-    try:
-        Gaia.ROW_LIMIT = row_limit
-        raw = Gaia.launch_job_async(adql).get_results()
-    finally:
-        Gaia.ROW_LIMIT = previous_limit
+    raw = _run_gaia_job(adql, row_limit)
     if raw is None or len(raw) == 0:
         raise CatalogError("Gaia returned no astrometric sources")
 

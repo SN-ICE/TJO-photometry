@@ -193,3 +193,57 @@ Two problems this turned up:
   that was not actually blurrier. Measured properly, the PS1 stamp gives a
   constant 3.79-3.90 px regardless of the science frame, and all eight epochs
   now correctly convolve the reference.
+
+## The gain model
+
+The header's `GAIN = 1.04` e-/ADU with `RDNOISE = 9.0` e- does not describe the
+frames that arrive. Measured two independent ways on MEIA2:
+
+- **Pixel-to-pixel scatter.** Adjacent-column differences over the central half
+  of a frame, divided by sqrt(2). On a B frame with sky 147 ADU this gives 7.1
+  ADU where the header values predict 14.7. The noise is white: the direct
+  patch scatter agrees to 1 per cent (7.10 vs 7.14), and block-averaging falls
+  as 1/n through 16x16 (7.11, 3.55, 1.79, 0.94, 0.53 against 7.11, 3.56, 1.78,
+  0.89, 0.44 for white noise). So this is a real noise measurement, not
+  small-scale smoothing.
+- **Differencing pairs of frames of the same field.** Integer-pixel shifts only,
+  so nothing is interpolated; the difference cancels the flat residual, the
+  fringe pattern and the field itself, leaving var(f1-f2) = var1 + var2. Over
+  107 pairs from three targets the per-frame sky sigma comes out at 6.9 ADU in
+  B at sky 136 -- the same answer as the pixel-to-pixel estimate.
+
+Both give an effective gain near 2.9-3.5 e-/ADU and a read-noise term that is
+negligible, not 9 e-. A factor of ~2.8 in variance with the read noise gone is
+what averaging about three sub-exposures looks like, and the full-well argument
+agrees: field stars clip at ~64000 ADU, which is 67000 e- at gain 1.04 and an
+implausible 190000 e- at gain 2.9. So the physical gain is probably right and
+the delivered frames are averages. The headers say nothing about it: no
+`NCOMBINE`, a single `DATE-OBS`, `EXPTIME = 200`, `IMAGEID = 1`.
+
+The pipeline now solves each frame's own sky for the gain its Poisson errors
+need (`image.measure_gain`, bounded by `image.gain_bounds`) and uses that for
+the error map, `combine_errors` and the cosmic-ray detector. Caveats:
+
+- Fringing and flat residual add variance at high sky, which drags the
+  solution down -- 3.5 in B, 2.5 in z on the same camera and the same night.
+  This is the effective gain of *that frame*, fit for an error bar and not a
+  measurement of the detector.
+- With the header read noise kept in the solve, the answer lands ~15 per cent
+  above the pure-Poisson reading (3.35 vs 2.92 in B). The pair fit prefers the
+  latter but its intercept is contaminated at high sky, so the truth sits
+  somewhere in that range. Against a term that was 180 per cent wrong, 15 per
+  cent is not worth agonising over.
+
+What this does **not** affect: the difference image's chi-square, the limiting
+magnitudes and every sky-dominated error bar. Those are built from the measured
+`bkg_rms`, never from the gain, so they were right all along. The gain enters
+only the source's own Poisson term, which matters for bright stars (and so for
+the zero-point fit's weights) and for L.A.Cosmic's threshold.
+
+Cosmic-ray rejection does get stricter -- 0.018 to 0.128 per cent of pixels in
+B -- because the detector had been expecting twice the noise. Checked against
+335 Gaia positions in two bands: no stellar core is touched and no star's flux
+moves, at either gain. The sources that lose most of their flux under the new
+threshold are 1-2 pixels across and absent from Gaia, which is what a cosmic
+ray looks like.
+

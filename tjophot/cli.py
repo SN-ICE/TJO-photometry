@@ -47,7 +47,12 @@ def _build_config(args) -> Config:
         overrides.setdefault("photometry", {})["aperture_scale"] = float(args.aperture_scale)
     if getattr(args, "catalogs", None):
         overrides.setdefault("calibration", {})["catalogs"] = list(args.catalogs)
-    return Config.load(user_config=args.config, target=args.target, overrides=overrides)
+    cfg = Config.load(user_config=args.config, target=args.target, overrides=overrides)
+    # Every command that reaches a catalogue goes through here, so this is the
+    # one place the Gaia deadline needs setting.
+    from . import catalogs as _cat
+    _cat.set_gaia_timeout(cfg.get("calibration.gaia_timeout_s", 300))
+    return cfg
 
 
 def cmd_run(args) -> int:

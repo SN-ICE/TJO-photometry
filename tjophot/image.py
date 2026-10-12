@@ -45,10 +45,57 @@ class ImageMeta:
     header_filter: str = ""
     extra: dict = field(default_factory=dict)
 
+    # Solved from the sky of this frame when it can be; see
+    # ScienceImage._check_noise_model. None means "use the header value".
+    gain_effective: Optional[float] = None
+
     @property
     def epoch_id(self) -> str:
         return f"{self.mjd:.5f}_{self.band}"
 
+    @property
+    def noise_gain(self) -> float:
+        """The gain to put in a Poisson error bar, in e- per ADU.
+
+        Not necessarily the header's GAIN. Whatever arrives has been through
+        the data centre, and on MEIA2 the delivered sky is a factor of ~2.8
+        quieter in variance than GAIN=1.04 with RDNOISE=9 allows -- which is
+        what you get from averaging about three sub-exposures. The physical
+        gain may well be 1.04; the *pixels* behave like 2.9, and it is the
+        pixels that the error bars have to describe.
+        """
+        if self.gain_effective and self.gain_effective > 0:
+            return float(self.gain_effective)
+        return float(self.gain)
+
+
+
+def _gain_from_sky(data, meta, cfg):
+    """Effective gain in e-/ADU from the pixel-to-pixel sky scatter, or None.
+
+    Solves sigma^2 = sky/g + (readnoise/g)^2 for g. Used before the background
+    exists, so it works off the raw frame; ScienceImage._check_noise_model
+    redoes it properly once the background map is in hand.
+    """
+    if not bool(cfg.get("image.measure_gain", True)):
+        return None
+    try:
+        ny, nx = data.shape
+        core = data[ny // 4:3 * ny // 4, nx // 4:3 * nx // 4]
+        diff = (core[:, 1:] - core[:, :-1]) / np.sqrt(2.0)
+        good = np.isfinite(diff)
+        if good.sum() < 1000:
+            return None
+        _, _, sigma = sigma_clipped_stats(diff[good], sigma=3.0, maxiters=5)
+        _, sky, _ = sigma_clipped_stats(core[np.isfinite(core)], sigma=3.0, maxiters=5)
+        rn = float(meta.readnoise)
+        if not (np.isfinite(sigma) and sigma > 0 and np.isfinite(sky) and sky > 0):
+            return None
+        g = (sky + np.sqrt(sky ** 2 + 4.0 * sigma ** 2 * rn ** 2)) / (2.0 * sigma ** 2)
+        lo, hi = (cfg.get("image.gain_bounds") or [0.3, 10.0])[:2]
+        return float(g) if float(lo) <= g <= float(hi) else None
+    except Exception:
+        return None
 
 def _nonlinear_level(cfg, defaults, saturation: float) -> float:
     """Top of the range where the detector still responds linearly.
@@ -268,8 +315,14 @@ class ScienceImage:
         # and before the mask and background, both of which they would bias.
         from . import cosmics
         fwhm_guess = float(cfg.get("detection.fwhm_init_arcsec", 2.0)) / max(pixel_scale, 1e-3)
+        # L.A.Cosmic decides what is a cosmic ray by how far a pixel sits above
+        # the noise it expects, so it needs the gain the pixels actually have,
+        # not the one the header claims. The background has not been estimated
+        # yet, so take a quick pixel-to-pixel reading here; cosmic rays are far
+        # too sparse to shift a sigma-clipped scatter.
+        image.meta.gain_effective = _gain_from_sky(image.data, meta, cfg)
         image.data, crmask, cr_info = cosmics.remove(
-            image.data, cfg, gain=meta.gain, readnoise=meta.readnoise,
+            image.data, cfg, gain=meta.noise_gain, readnoise=meta.readnoise,
             saturation=meta.saturation, fwhm_px=fwhm_guess)
         image.crmask = crmask
         image.qa.update(cr_info)
@@ -398,9 +451,9 @@ class ScienceImage:
 
         self.qa["sky_adu"] = float(np.nanmedian(self.bkg_map))
         self.qa["sky_rms_adu"] = float(np.nanmedian(self.bkg_rms))
-        self._check_noise_model()
+        self._check_noise_model(cfg)
 
-    def _check_noise_model(self) -> None:
+    def _check_noise_model(self, cfg=None) -> None:
         """Measured sky scatter over what the gain and read noise predict.
 
         The gain enters every Poisson error bar and the cosmic-ray detector, and
@@ -430,13 +483,52 @@ class ScienceImage:
             self.qa["sky_noise_measured_adu"] = float(measured)
             self.qa["sky_noise_predicted_adu"] = float(predicted)
             self.qa["sky_noise_ratio"] = ratio
-            level = log.warning if not (0.75 <= ratio <= 1.33) else log.debug
-            level("%s: sky scatter %.2f ADU against %.2f predicted by gain %.2f e-/ADU and "
-                  "read noise %.1f e- (ratio %.2f)%s", self.meta.path.name, measured,
-                  predicted, gain, rn, ratio,
-                  "" if 0.75 <= ratio <= 1.33 else
-                  " -- the gain model looks wrong for this frame; check binning_mode / "
-                  "stack_mode in the instrument file")
+
+            # Solve the same relation for the gain instead of just complaining
+            # about it. sigma^2 = sky/g + (rn/g)^2, so with the read-noise term
+            # written as a fraction of the total this is a quadratic in g. Two
+            # independent measurements on MEIA2 -- the pixel-to-pixel scatter
+            # here, and differencing pairs of frames of the same field, which
+            # cancels the flat and the fringe -- both land near 2.9 e-/ADU
+            # against a header value of 1.04.
+            #
+            # Fringing and flat-field residual add variance at high sky, which
+            # drags the solution down (2.9 in B, 2.2 in z on the same camera),
+            # so this is the effective gain of *this frame*, not a measurement
+            # of the detector. That is the right thing for an error bar and the
+            # wrong thing to quote in a paper.
+            if cfg is not None and bool(cfg.get("image.measure_gain", True)):
+                lo, hi = (cfg.get("image.gain_bounds") or [0.3, 10.0])[:2]
+                disc = sky ** 2 + 4.0 * measured ** 2 * rn ** 2
+                solved = (sky + np.sqrt(disc)) / (2.0 * measured ** 2) \
+                    if measured > 0 and disc >= 0 else np.nan
+                if np.isfinite(solved) and float(lo) <= solved <= float(hi):
+                    self.meta.gain_effective = float(solved)
+                    self.qa["gain_effective"] = float(solved)
+                    log.debug("%s: effective gain %.2f e-/ADU from the sky "
+                              "(header %.2f)", self.meta.path.name, solved, gain)
+                elif np.isfinite(solved):
+                    log.warning("%s: sky implies a gain of %.2f e-/ADU, outside "
+                                "image.gain_bounds; keeping the header value %.2f",
+                                self.meta.path.name, solved, gain)
+            solved = self.qa.get("gain_effective")
+            if solved:
+                # The mismatch is now handled, not merely noticed, so this is
+                # information rather than a warning.
+                log.info("%s: sky scatter %.2f ADU where gain %.2f e-/ADU and read "
+                         "noise %.1f e- predict %.2f; using an effective gain of "
+                         "%.2f e-/ADU for Poisson errors",
+                         self.meta.path.name, measured, gain, rn, predicted, solved)
+            elif 0.75 <= ratio <= 1.33:
+                log.debug("%s: sky scatter %.2f ADU against %.2f predicted "
+                          "(ratio %.2f)", self.meta.path.name, measured,
+                          predicted, ratio)
+            else:
+                log.warning("%s: sky scatter %.2f ADU against %.2f predicted by gain "
+                            "%.2f e-/ADU and read noise %.1f e- (ratio %.2f) -- and the "
+                            "sky will not solve for a sensible gain either; check "
+                            "binning_mode / stack_mode in the instrument file",
+                            self.meta.path.name, measured, predicted, gain, rn, ratio)
         except Exception as exc:  # pragma: no cover - diagnostic only
             log.debug("noise-model check skipped: %s", exc)
 
@@ -449,7 +541,7 @@ class ScienceImage:
         if self.bkg_rms is None:
             raise RuntimeError("call estimate_background() before build_error_map()")
         source = np.clip(self.data - self.bkg_map, 0.0, None)
-        var = self.bkg_rms.astype(float) ** 2 + source / max(self.meta.gain, 1e-6)
+        var = self.bkg_rms.astype(float) ** 2 + source / max(self.meta.noise_gain, 1e-6)
         self.error = np.sqrt(var)
         return self.error
 

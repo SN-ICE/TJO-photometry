@@ -488,7 +488,7 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
         camera=identify(image.header).instrument,
         pixel_scale=image.meta.pixel_scale,
         rebin=image.qa.get("rebin", 1),
-        gain_eff=image.meta.gain,
+        gain_eff=image.meta.noise_gain,
         sky_noise_ratio=image.qa.get("sky_noise_ratio", np.nan),
         obs_zp=image.meta.extra.get("obs_zp", np.nan),
         obs_zp_err=image.meta.extra.get("obs_zp_err", np.nan),
@@ -564,7 +564,7 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
     sky_sigma = ph.blank_aperture_noise(image, ap_radius, cfg) \
         if bool(cfg.get("photometry.empirical_errors", True)) else float("nan")
     aper_err = ph.combine_errors(float(tab["flux"][0]), float(tab["flux_err"][0]),
-                                 sky_sigma, image.meta.gain)
+                                 sky_sigma, image.meta.noise_gain)
     rows.append(_photometry_row(common, "aperture", float(tab["flux"][0]),
                                 aper_err, zp, apcor.apcor_mag,
                                 image, x=sn_xy[0], y=sn_xy[1],
@@ -601,7 +601,7 @@ def process_image(image: ScienceImage, cfg, coord: SkyCoord, cache_root: Path,
         fit = ph.psf_photometry_at(image, epsf, [sn_xy], fwhm, cfg)
         if len(fit):
             psf_err = ph.combine_errors(float(fit["flux"][0]), float(fit["flux_err"][0]),
-                                        sky_sigma, image.meta.gain)
+                                        sky_sigma, image.meta.noise_gain)
             psf_flags = lc.FLAG_BAD_PSF if ph.psf_fit_failed(fit)[0] else 0
             rows.append(_photometry_row({**common, **_psf_diagnostics(fit)}, "psf", float(fit["flux"][0]),
                                         psf_err, zp, psf_corr, image,
@@ -734,7 +734,7 @@ def _difference_rows(diff, image, cfg, coord, common, zp, limit,
     sky_sigma = ph.blank_aperture_noise(stamp, ap_radius, cfg) \
         if bool(cfg.get("photometry.empirical_errors", True)) else float("nan")
     diff_err = ph.combine_errors(float(tab["flux"][0]), float(tab["flux_err"][0]),
-                                 sky_sigma, image.meta.gain * scale)
+                                 sky_sigma, image.meta.noise_gain * scale)
     # Imperfect host subtraction around the transient, as an extra flux error.
     host = diffquality.host_residual(diff.difference, diff.reference_stamp, sn_xy, fwhm, cfg,
                                      noise_per_aperture=sky_sigma)
@@ -770,7 +770,7 @@ def _difference_rows(diff, image, cfg, coord, common, zp, limit,
         fit = ph.psf_photometry_at(stamp, epsf, [sn_xy], fwhm, cfg)
         if len(fit):
             dpsf_err = ph.combine_errors(float(fit["flux"][0]), float(fit["flux_err"][0]),
-                                         sky_sigma, image.meta.gain * scale)
+                                         sky_sigma, image.meta.noise_gain * scale)
             psf_sys = 0.0
             if host_sys > 0 and np.isfinite(ap_flux) and ap_flux > 0:
                 # the same fractional residual, on the PSF (total-flux) scale

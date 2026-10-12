@@ -77,6 +77,14 @@ image:
   # `nonlinear_adu` when the turnover has actually been measured.
   nonlinear_frac: 0.87
   nonlinear_adu: null
+  # Solve the frame's own sky for the gain that its Poisson error bars need,
+  # instead of trusting the header. What arrives has been through the data
+  # centre: on MEIA2 the delivered sky is ~2.8x quieter in variance than
+  # GAIN=1.04 with RDNOISE=9 allows, which is what averaging about three
+  # sub-exposures looks like. Outside these bounds the header value is kept
+  # and the mismatch is logged.
+  measure_gain: true
+  gain_bounds: [0.3, 10.0]
   # Ignore this border when detecting and calibrating. In arcsec so it means
   # the same patch of sky at any binning; edge_margin_px still works if set.
   edge_margin_arcsec: 9.0
@@ -174,6 +182,12 @@ calibration:
   # field on SN2021adlr. 'auto' is a fifth of the radius; 0 or 'off' requires an
   # exact hit on the 0.01 deg cache grid.
   reuse_cached_within_arcsec: auto
+  # Seconds to wait for a Gaia TAP job. The archive queues async jobs and
+  # astroquery waits on them with no deadline, so without this a stalled job
+  # hangs the run silently. On timeout the next catalogue in `catalogs` is
+  # tried instead -- APASS covers B and V, so a Gaia outage costs precision,
+  # not the epoch. Override per run with TJOPHOT_GAIA_TIMEOUT.
+  gaia_timeout_s: 300
 
   catalogs: [gaia_synth, panstarrs, apass]   # tried in order, per band
   search_radius_arcmin: auto     # as above: sized to the frame being calibrated
