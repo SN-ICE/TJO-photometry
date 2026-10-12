@@ -1,7 +1,7 @@
 numpy>=1.24
 scipy>=1.10
 astropy>=5.3
-photutils>=1.10
+photutils>=1.10,<3   # 3.0 renames xcentroid/ycentroid, used throughout
 astroquery>=0.4.7
 reproject>=0.13
 matplotlib>=3.7
